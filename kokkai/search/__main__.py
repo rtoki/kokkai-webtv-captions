@@ -144,7 +144,7 @@ def _print_suggestions(query: str, out_dir: Path, *, days: int) -> None:
         dur = f" / {it['duration']}" if it.get("duration") else ""
         print(f"  {it.get('date')} [{house}] {it.get('title')}{dur}")
         cmd = "sangiin" if it.get("house") == "sangiin" else "shugiin"
-        print(f"    取込: kkcap fetch {it.get('id')}  (or `{cmd} {it.get('id')}`)")
+        print(f"    取込: kkcap fetch {it.get('id')}  (or `kkcap {cmd} {it.get('id')}`)")
 
 
 if __name__ == "__main__":

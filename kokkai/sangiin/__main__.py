@@ -144,17 +144,26 @@ def _write_meta_json(
     参議院は公式 VTT 字幕 (人間がつけた台本) を使うので AI 校正は無関係。
     pipeline には `{"phase": "vtt"}` を入れて、レンダラがヘッダで「公式 VTT
     (AI 校正なし)」と明示できるようにする。
+
+    ライブ中継 (meta["is_live"] = True もしくは speakers リストが空) の場合は
+    ``pipeline["live"] = True`` も入れる。後日 ``kkcap fetch --refresh-pending``
+    で再取得して発言者リスト等を充足させるためのマーカー。
     """
     import time as _time
+    speakers = meta.get("speakers") or []
+    is_live = bool(meta.get("is_live")) or not speakers
+    pipeline: dict = {"phase": "vtt"}
+    if is_live:
+        pipeline["live"] = True
     payload = {
         "house": house,
         "id": target_id,
         "date": meta.get("date", ""),
         "title": meta.get("title", ""),
         "page_url": page_url,
-        "speakers": meta.get("speakers") or [],
+        "speakers": speakers,
         "files": files,
-        "pipeline": {"phase": "vtt"},
+        "pipeline": pipeline,
         "generated_at": _time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     path.write_text(

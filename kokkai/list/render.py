@@ -41,7 +41,7 @@ def render_human(items: list[dict]) -> str:
         cmd = "sangiin" if it.get("house") == "sangiin" else "shugiin"
         if item_id:
             lines.append(
-                f"    id={item_id}  取込: kkcap fetch {item_id}  (or `{cmd} {item_id}`)"
+                f"    id={item_id}  取込: kkcap fetch {item_id}  (or `kkcap {cmd} {item_id}`)"
             )
         else:
             lines.append("    id=(未解決)  取込: page_url から sid/deli_id を確認してください")

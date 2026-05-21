@@ -103,18 +103,26 @@ def _write_meta_json(
 
     pipeline には ASR / 校正パイプラインの記録 (asr_backend, asr_model,
     llm_correct 等) を含める。レンダラがヘッダ表示に使う。
+
+    speakers リストが空のときは ``pipeline["live"] = True`` を入れる。
+    衆議院ページの発言者リストはライブ中継の途中だと未確定で空になることが
+    あるため、後日 ``kkcap fetch --refresh-pending`` で発言者付き再取得を可能に。
     """
     import time as _time
+    speakers = meta.get("speakers") or []
+    pipeline = dict(pipeline) if pipeline else {"phase": "phase2"}
+    if not speakers:
+        pipeline["live"] = True
     payload = {
         "house": "shugiin",
         "id": meta.get("deli_id", ""),
         "date": meta.get("date", ""),
         "title": meta.get("title", ""),
         "page_url": meta.get("page_url", ""),
-        "speakers": meta.get("speakers") or [],
+        "speakers": speakers,
         "agenda": meta.get("agenda") or [],
         "files": files,
-        "pipeline": pipeline or {"phase": "phase2"},
+        "pipeline": pipeline,
         "generated_at": _time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     path.write_text(

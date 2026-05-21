@@ -82,7 +82,42 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="生成後にブラウザを開かない")
     parser.add_argument("--dry-run", action="store_true",
                         help="fetch せず、対象 ID を <院>\\t<id>[\\t<日付 タイトル>] で表示")
+    parser.add_argument("--refresh-pending", action="store_true",
+                        help="既存 meta.json で pipeline.live=true (ライブ中継で発言者リスト未確定) "
+                             "のものを ID 集合に追加して再取得")
+    parser.add_argument("--skip-asr", action="store_true",
+                        help="衆議院: 既存 transcript.json から HTML 再 render のみ (--refresh-pending と"
+                             "併用すると、ライブ中継で取り込んだ衆議院会議を ASR 再実行なしで発言者リスト付きに更新)")
     return parser
+
+
+def _scan_pending(out_dir: str) -> list[tuple[str, str, str]]:
+    """``out/*.meta.json`` から ``pipeline.live=true`` のものを拾う。
+
+    Returns: ``[(house, id, "YYYY-MM-DD title"), ...]``
+    """
+    import json
+    from pathlib import Path
+
+    base = Path(out_dir)
+    if not base.exists():
+        return []
+    out: list[tuple[str, str, str]] = []
+    for mp in sorted(base.glob("*.meta.json")):
+        try:
+            m = json.loads(mp.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        pipeline = m.get("pipeline") or {}
+        if not pipeline.get("live"):
+            continue
+        rid = str(m.get("id") or "")
+        if not rid:
+            continue
+        house = m.get("house") or ""
+        label = f"{m.get('date','')} {m.get('title','')}".strip()
+        out.append((house, rid, label))
+    return out
 
 
 def _enumerate_by_date(args: argparse.Namespace) -> list[tuple[str, str, str]]:
@@ -127,8 +162,8 @@ def main(argv: list[str] | None = None) -> None:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    if not args.target and args.date_from is None and args.date_to is None:
-        parser.error("target または --from/--to のどちらかは指定してください")
+    if not args.target and args.date_from is None and args.date_to is None and not args.refresh_pending:
+        parser.error("target / --from/--to / --refresh-pending のいずれかは指定してください")
 
     # 院ごとに振り分け
     sangiin_targets: list[str] = []
@@ -158,6 +193,28 @@ def main(argv: list[str] | None = None) -> None:
                 sangiin_targets.append(rid)
             else:
                 shugiin_targets.append(rid)
+
+    # --refresh-pending: meta.json で pipeline.live=true のものを ID 集合に追加。
+    # ライブ中継時に発言者リスト未確定で取り込まれたものを後日完全な状態で再取得する用途。
+    if args.refresh_pending:
+        pending = _scan_pending(args.output)
+        existing = set(sangiin_targets) | set(shugiin_targets)
+        added = 0
+        for house, rid, label in pending:
+            if rid in existing:
+                continue
+            existing.add(rid)
+            labels[rid] = label
+            if house == "sangiin":
+                sangiin_targets.append(rid)
+            else:
+                shugiin_targets.append(rid)
+            added += 1
+        print(
+            f"[fetch] --refresh-pending: pipeline.live=true の会議 {len(pending)} 件中 "
+            f"{added} 件を追加",
+            file=sys.stderr,
+        )
 
     if args.dry_run:
         for t in sangiin_targets:
@@ -206,6 +263,8 @@ def main(argv: list[str] | None = None) -> None:
             argv_shugiin.append("--skip-if-done")
         if not args.asr:
             argv_shugiin.append("--no-asr")
+        if args.skip_asr:
+            argv_shugiin.append("--skip-asr")
         saved = sys.argv
         sys.argv = ["shugiin"] + argv_shugiin
         try:

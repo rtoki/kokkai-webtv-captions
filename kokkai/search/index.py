@@ -121,16 +121,22 @@ def _get_cued_tokens(
     cues_loader,  # () -> list[dict({start, end, text})]
     file_cache: dict[str, dict],
     use_cache: bool,
+    processed_keys: set[str] | None = None,
 ) -> tuple[list[dict], bool]:
     """ソースファイルから cue 一覧を取り、SudachiPy で tokens を付与する。
 
     キャッシュが有効かつ source の mtime と一致していれば、tokenize をスキップ。
+    ``processed_keys`` を渡すと、今回処理したソースファイル key (絶対パス)
+    を集めて返す (manifest drift 検出に使う)。
+
     Returns:
         (cues_with_tokens, changed):
         cues_with_tokens: ``[{start, end, text, tokens: [...]}, ...]``
         changed: キャッシュを更新する必要があるなら True
     """
     key = str(source_path.resolve())
+    if processed_keys is not None:
+        processed_keys.add(key)
     cached = file_cache.get(key)
     if use_cache and _cache.is_fresh(cached, source_path):
         return cached["cues"], False
@@ -149,14 +155,19 @@ def iter_records(out_dir: Path, *, use_cache: bool = True) -> list[dict]:
     (file 名から date / title を推測、speakers/jump_url は空)。
 
     SudachiPy 形態素解析の結果は ``out/.kokkai-search-cache.json`` にキャッシュ
-    される (ソース mtime で自動無効化)。``use_cache=False`` で無効化。
+    される (ソース mtime で自動無効化、`out/` のファイル集合変化も検知)。
+    ``use_cache=False`` で無効化。
     """
     records: list[dict] = []
     if not out_dir.exists():
         return records
 
-    file_cache: dict[str, dict] = _cache.load_cache(out_dir) if use_cache else {}
+    if use_cache:
+        file_cache, prev_manifest = _cache.load_cache(out_dir)
+    else:
+        file_cache, prev_manifest = {}, set()
     cache_changed = False
+    processed_keys: set[str] = set()
     seen_bases: set[str] = set()
 
     # 1. meta.json 付き (本来の経路)
@@ -179,6 +190,7 @@ def iter_records(out_dir: Path, *, use_cache: bool = True) -> list[dict]:
             lambda: _read_cues_for_meta(meta_path, meta),
             file_cache,
             use_cache,
+            processed_keys,
         )
         if changed:
             cache_changed = True
@@ -215,6 +227,7 @@ def iter_records(out_dir: Path, *, use_cache: bool = True) -> list[dict]:
             lambda: _parse_vtt(vtt_path.read_text(encoding="utf-8")),
             file_cache,
             use_cache,
+            processed_keys,
         )
         if changed:
             cache_changed = True
@@ -254,7 +267,7 @@ def iter_records(out_dir: Path, *, use_cache: bool = True) -> list[dict]:
             ]
 
         cues_with_tokens, changed = _get_cued_tokens(
-            tr_path, _load_tr_cues, file_cache, use_cache,
+            tr_path, _load_tr_cues, file_cache, use_cache, processed_keys,
         )
         if changed:
             cache_changed = True
@@ -276,8 +289,26 @@ def iter_records(out_dir: Path, *, use_cache: bool = True) -> list[dict]:
                 "meta_path": str(tr_path),
             })
 
-    if use_cache and cache_changed:
-        _cache.save_cache(out_dir, file_cache)
+    if use_cache:
+        # manifest drift 検出: 期待ファイル集合と現在の glob 結果が違うなら、
+        # 死んだエントリを drop してキャッシュを保存し直す
+        dead_keys = set(file_cache.keys()) - processed_keys
+        if dead_keys:
+            for k in dead_keys:
+                file_cache.pop(k, None)
+            cache_changed = True
+        if processed_keys != prev_manifest:
+            added = processed_keys - prev_manifest
+            removed = prev_manifest - processed_keys
+            if prev_manifest:  # 初回構築はうるさいので静かに
+                print(
+                    f"[search-cache] manifest drift: +{len(added)} added, "
+                    f"-{len(removed)} removed (キャッシュ更新)",
+                    file=sys.stderr,
+                )
+            cache_changed = True
+        if cache_changed:
+            _cache.save_cache(out_dir, file_cache)
 
     return records
 

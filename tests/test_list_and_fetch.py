@@ -140,6 +140,75 @@ def test_dry_run_emits_enumerated_ids_only(monkeypatch, capsys):
     assert "sangiin\t8955" in out
 
 
+def test_scan_pending_returns_only_live_meetings(tmp_path):
+    """``_scan_pending`` は pipeline.live=true の meta.json のみ拾う。"""
+    import json as _json
+
+    # live (今日のライブ取込)
+    (tmp_path / "2026-05-21_内閣委員会_参9027.meta.json").write_text(
+        _json.dumps({
+            "house": "sangiin", "id": "9027",
+            "date": "2026-05-21", "title": "内閣委員会",
+            "speakers": [],
+            "pipeline": {"phase": "vtt", "live": True},
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    # 確定済 (live マークなし)
+    (tmp_path / "2026-05-19_本会議_参8950.meta.json").write_text(
+        _json.dumps({
+            "house": "sangiin", "id": "8950",
+            "date": "2026-05-19", "title": "本会議",
+            "speakers": [{"start": 0, "name": "X", "group": "Y"}],
+            "pipeline": {"phase": "vtt"},
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    pending = _fetch_mod._scan_pending(str(tmp_path))
+    assert len(pending) == 1
+    assert pending[0] == ("sangiin", "9027", "2026-05-21 内閣委員会")
+
+
+def test_refresh_pending_adds_targets_and_skips_existing(monkeypatch, tmp_path):
+    """``--refresh-pending`` は pending IDs をターゲット集合に追加。
+    既に explicit target で指定されていれば二重追加しない。"""
+    import json as _json
+    from kokkai.list import shugiin_list, sangiin_list
+
+    (tmp_path / "2026-05-21_内閣委員会_参9027.meta.json").write_text(
+        _json.dumps({
+            "house": "sangiin", "id": "9027", "date": "2026-05-21",
+            "title": "内閣委員会", "speakers": [],
+            "pipeline": {"phase": "vtt", "live": True},
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (tmp_path / "2026-05-21_憲法審査会_衆56263.meta.json").write_text(
+        _json.dumps({
+            "house": "shugiin", "id": "56263", "date": "2026-05-21",
+            "title": "憲法審査会", "speakers": [],
+            "pipeline": {"phase": "asr", "live": True},
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    # date 列挙系を空に
+    monkeypatch.setattr(shugiin_list, "fetch_for_range", lambda s, e: [])
+    monkeypatch.setattr(sangiin_list, "fetch_for_range", lambda s, e: [])
+
+    # fetch main を爆発させる代わりに、dry-run で出力だけ拾う
+    def explode(*a, **kw):
+        raise AssertionError("実際の fetch は走らせない")
+    monkeypatch.setattr("kokkai.sangiin.__main__.main", explode)
+    monkeypatch.setattr("kokkai.shugiin.__main__.main", explode)
+
+    with pytest.raises(SystemExit) as ei:
+        _fetch_mod.main([
+            "--refresh-pending", "--dry-run", "-o", str(tmp_path),
+        ])
+    assert ei.value.code == 0
+
+
 def test_dry_run_includes_explicit_targets(monkeypatch, capsys):
     """``--dry-run`` は --from/--to の列挙に加えて explicit target も stdout に出す。"""
     from kokkai.list import shugiin_list, sangiin_list

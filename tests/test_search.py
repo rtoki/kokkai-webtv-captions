@@ -386,3 +386,57 @@ def test_cache_version_mismatch_rebuilds(tmp_path: Path):
     # 再構築された結果、新しい version になっている
     saved = _json.loads(_cache.cache_path(tmp_path).read_text(encoding="utf-8"))
     assert saved["version"] == _cache.CACHE_VERSION
+
+
+def test_cache_picks_up_new_file_after_first_run(tmp_path: Path):
+    """初回構築後に新ファイルが追加されたら、2 回目の iter_records で manifest drift を
+    検知してキャッシュに反映する (今回 9027 を取り損ねた症状の回帰防止)。"""
+    import json as _json
+    from kokkai.search import cache as _cache
+
+    # 1 回目: 1 ファイルだけある状態でキャッシュ構築
+    (tmp_path / "2026-05-19_A委員会.vtt").write_text(
+        "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nテスト A\n",
+        encoding="utf-8",
+    )
+    r1 = iter_records(tmp_path)
+    assert len(r1) == 1
+    saved1 = _json.loads(_cache.cache_path(tmp_path).read_text(encoding="utf-8"))
+    assert len(saved1.get("manifest") or []) == 1
+
+    # 2 回目: 新規ファイル追加 → キャッシュは既存 mtime 比較で不変だが、
+    # manifest drift で新ファイルが取り込まれる必要がある
+    (tmp_path / "2026-05-21_B委員会.vtt").write_text(
+        "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nテスト B\n",
+        encoding="utf-8",
+    )
+    r2 = iter_records(tmp_path)
+    assert len(r2) == 2
+    saved2 = _json.loads(_cache.cache_path(tmp_path).read_text(encoding="utf-8"))
+    assert len(saved2.get("manifest") or []) == 2
+    assert any("B委員会" in p for p in saved2["manifest"])
+
+
+def test_cache_drops_dead_entries_on_file_removal(tmp_path: Path):
+    """ソースファイルが消えたら次回 iter_records でキャッシュから drop される。"""
+    import json as _json
+    from kokkai.search import cache as _cache
+
+    (tmp_path / "2026-05-19_A委員会.vtt").write_text(
+        "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nテスト A\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "2026-05-20_B委員会.vtt").write_text(
+        "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nテスト B\n",
+        encoding="utf-8",
+    )
+    iter_records(tmp_path)
+    saved1 = _json.loads(_cache.cache_path(tmp_path).read_text(encoding="utf-8"))
+    assert len(saved1["files"]) == 2
+
+    # B を消す
+    (tmp_path / "2026-05-20_B委員会.vtt").unlink()
+    iter_records(tmp_path)
+    saved2 = _json.loads(_cache.cache_path(tmp_path).read_text(encoding="utf-8"))
+    assert len(saved2["files"]) == 1
+    assert all("B委員会" not in p for p in saved2["files"].keys())
