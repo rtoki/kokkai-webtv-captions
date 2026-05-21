@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kokkai-webtv-captions"
+version = "0.2.0"
+description = "国会インターネット中継 (参議院 webtv / 衆議院 shugiintv) から発言者別 HTML を生成するツール群"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "kokkai-webtv-captions contributors" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "License :: OSI Approved :: MIT License",
+    "Natural Language :: Japanese",
+    "Topic :: Text Processing :: Linguistic",
+]
+dependencies = [
+    "sudachipy>=0.6",
+    "sudachidict_core>=20230711",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+# 衆議院 ASR モード (Mac / Linux 両対応)。`ffmpeg` バイナリは別途システム
+# インストール必須 (`brew install ffmpeg` / `apt install ffmpeg`)。
+shugiin-asr = ["faster-whisper>=1.0"]
+# Apple Silicon ネイティブ ASR (`--asr-backend mlx`)。subprocess 経由で起動
+# するので Python 依存としては不要だが、`uv tool install mlx-whisper` 等で
+# 別途用意してもよい。便宜的にここに置く。
+shugiin-asr-mlx = ["mlx-whisper>=0.4"]
+# LLM 校正 / 2-pass context のローカル backend (Apple Silicon)。
+# Outlines + mlx-lm で grammar-constrained generation。
+llm-mlx = ["outlines[mlxlm]>=0.1", "mlx-lm>=0.19", "pydantic>=2"]
+
+[project.scripts]
+kkcap        = "kokkai.__main__:main"
+kkcap-search = "kokkai.search.__main__:main"
+kkcap-list   = "kokkai.list.__main__:main"
+kkcap-fetch  = "kokkai.fetch:main"
+
+[tool.setuptools.packages.find]
+include = ["kokkai*"]
+exclude = ["tests*", "out*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.uv]
+# macOS の uv ハードリンクで .pth に UF_HIDDEN が付くと Python 3.13+ が
+# editable install の .pth を読み飛ばし `ModuleNotFoundError` になるため、
+# コピーモードで配置する。
+link-mode = "copy"

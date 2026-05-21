@@ -1,0 +1,70 @@
+# Lockfile (公開リポではユーザの uv sync で fresh resolve させる)
+uv.lock
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Outputs (生成物)
+out/
+*.vtt
+*.html
+*.txt
+*.wav
+*.mp3
+*.mp4
+*.m4a
+*_transcript.json
+*_mlx.json
+*.meta.json
+sections.json
+summaries.json
+splits.json
+.kokkai-search-cache.json
+
+# Local secrets / credentials
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials/
+
+# テスト用フィクスチャは外部サイト由来なので track しない
+# 取得は scripts/fetch_fixtures.py 経由 (未取得ならテストは自動 skip)
+tests/fixtures/*.html
+
+# IDE / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*~
+
+# Local scratch
+_scratch/
+/tmp/
+
+# Local-only writing 
+blog.md
+
+# 公開前セルフチェック用 (公開リポには含めない、手元のみ)
+scripts/check_publication_risk.py
