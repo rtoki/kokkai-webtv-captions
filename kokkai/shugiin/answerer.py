@@ -30,6 +30,54 @@ from collections import defaultdict
 from kokkai.sangiin.detect import classify_role_str, detect_speaker_calls
 
 
+# chair アナウンス cue の前置接続詞 (「では、〇〇大臣」のように冒頭に来やすい)。
+# 長 cue でこの prefix の後に call が来ているなら委員長アナウンスと判定する。
+_CHAIR_INTRO_PREFIX_CHARS = 12
+
+# 委員長アナウンスとみなす最大 cue 長 (短い cue = bare announcement)。
+_CHAIR_INTRO_SHORT_CUE_CHARS = 40
+
+
+def _looks_like_chair_intro(cue_text: str, call_offset_in_cue: int) -> bool:
+    """``cue_text`` 中の call が委員長アナウンスっぽいかの heuristic 判定。
+
+    True を返すのは:
+    - cue 全体が ``_CHAIR_INTRO_SHORT_CUE_CHARS`` 文字未満 (bare な「○○大臣」)
+    - もしくは call が cue 冒頭 ``_CHAIR_INTRO_PREFIX_CHARS`` 文字以内
+      (「では、○○大臣」「次に、○○大臣」許容)
+
+    False になるケース: 議員質問中の「私から○○大臣にお伺いします」のように
+    call が長い文の中盤にあるパターン。
+    """
+    text = (cue_text or "").strip()
+    if len(text) < _CHAIR_INTRO_SHORT_CUE_CHARS:
+        return True
+    return call_offset_in_cue <= _CHAIR_INTRO_PREFIX_CHARS
+
+
+def _find_original_questioner_by_surname(
+    sorted_originals: list[dict],
+    surname: str,
+    before_time: float,
+) -> dict | None:
+    """``sorted_originals`` の中から、``before_time`` 以前に登壇した同姓の公式
+    speaker を最も新しいもの優先で 1 件返す (見つからなければ None)。
+
+    surname は姓のみ (1〜3 文字) を想定。完全マッチ → 前方一致 の順で探す。
+    """
+    if not surname:
+        return None
+    candidates = [
+        s for s in sorted_originals
+        if s.get("start", 0.0) <= before_time
+        and ((s.get("name") or "") == surname
+             or (s.get("name") or "").startswith(surname))
+    ]
+    if not candidates:
+        return None
+    return candidates[-1]
+
+
 def inject_answerer_turns(
     speakers: list[dict],
     cues: list[dict],
@@ -45,8 +93,15 @@ def inject_answerer_turns(
     入っておらず、議員のセクション内に委員長発話が埋まっている。そのため委員長
     セクション限定にすると検出ほぼゼロになる。
 
-    false positive (議員質問中の「○○大臣は」言及) は ``sangiin.detect`` が
-    『役職直後が助詞なら言及として除外』する判定で抑えている。
+    false positive (議員質問中の「○○大臣にお伺いします」) は 2 段で抑える:
+
+    1. ``sangiin.detect`` が『役職直後が助詞なら言及として除外』
+    2. 本関数の ``_looks_like_chair_intro`` heuristic (cue 長 + call 位置)
+
+    `_return` ("○○くん") を検出した場合は、直前の auto_detected (= 大臣等)
+    turn を打ち切るために、公式 speakers 中の同姓質問者に戻る turn を挿入する。
+    これがないと「大臣答弁の後、再質問に戻ったのに大臣セクションが続く」誤帰属が
+    残る。
 
     Args:
         speakers: ``[{"start", "name", "group"}, ...]`` (公式メタ由来、議員のみ)
@@ -59,9 +114,19 @@ def inject_answerer_turns(
     if not speakers or not cues:
         return list(speakers)
 
+    # 公式 speakers (auto_detected フラグなし) を time 順に並べる。
+    # `_return` のときの「直前の同姓質問者」検索に使う。
+    sorted_originals = sorted(
+        (s for s in speakers if not s.get("auto_detected")),
+        key=lambda s: float(s.get("start", 0.0)),
+    )
+
     new_entries: list[dict] = []
-    # 同じ (時刻, 人名, 役職) の重複を防ぐ
     seen: set[tuple[float, str, str]] = set()
+
+    # 直近に挿入した turn が大臣・政府参考人系なら True。
+    # `_return` を使って「議員へ戻る」 turn を入れるかの判定に使う。
+    last_injected_is_answerer = False
 
     for cue in cues:
         try:
@@ -69,22 +134,61 @@ def inject_answerer_turns(
         except Exception:
             # SudachiPy が落ちても他の cue は走らせ続ける
             continue
+        cue_text = cue.get("text") or ""
+        # cue 内の call.start は元 text 上の offset。base_offset の関係で
+        # cue 全文の先頭からの相対位置として使えるはず (cue.text 単位で
+        # detect_speaker_calls を呼んでいるので)。
         for call in calls:
             role_str = call.get("role_str", "")
-            # 質問者復帰 ('_return' = 「○○くん」) は新 turn ではないので除外
+            name = (call.get("name") or "").strip()
+            call_offset = int(call.get("start", 0))
+
+            # 質問者復帰 (`_return` = 「○○くん」) は委員長が質問者を再度呼び出し
+            # たマーカ。直前 auto-detected (大臣) turn があるときに限り、公式
+            # speakers 中の同姓質問者に戻る turn を挿入する。
             if role_str == "_return":
+                if not last_injected_is_answerer:
+                    continue
+                # cue.end ちょうどを使う (`+ 0.01` を足すと、次の cue が同時刻
+                # から始まる場合に 1 cue 分前のセクションへ取り込まれる)
+                cue_end = float(cue["end"])
+                orig = _find_original_questioner_by_surname(
+                    sorted_originals, name, before_time=cue_end,
+                )
+                if orig is None:
+                    continue
+                key = (round(cue_end, 1), orig.get("name", ""), "_return")
+                if key in seen:
+                    continue
+                seen.add(key)
+                new_entries.append({
+                    "start": cue_end,
+                    "name": orig.get("name", ""),
+                    "group": orig.get("group", ""),
+                    "auto_detected": True,
+                    "return_to_questioner": True,
+                })
+                last_injected_is_answerer = False
                 continue
+
             klass = classify_role_str(role_str)
             # 議員自身への言及 (questioner) や役職外 (other) は除外。
             # chair (委員長) も新 turn として追加しない (公式メタに既にあるか、
             # 議員セクション内の繋ぎ発話は分離する価値が低い)。
             if klass in ("questioner", "chair", "other"):
                 continue
-            name = call.get("name", "").strip()
             if not name:
                 continue
-            # アナウンス cue の直後を新 turn の start に
-            start = float(cue["end"]) + 0.01
+            # heuristic: 質問者が「○○大臣にお伺い」のように長文の中で言及する
+            # ケースを弾く。委員長アナウンスは bare ("○○大臣") か短い前置詞
+            # 付き ("では○○大臣") のはず。
+            if not _looks_like_chair_intro(cue_text, call_offset):
+                continue
+            # アナウンス cue の終端を新 turn の start に。`+ 0.01` を足すと、
+            # 次の cue (= 答弁本文) が同時刻から始まる場合に 1 cue 分が前の
+            # 質問者セクションに吸われる (assign_cues_to_speakers が >= で
+            # 振り分けるため)。cue.end ちょうどに合わせる。
+            start = float(cue["end"])
             key = (round(start, 1), name, role_str)
             if key in seen:
                 continue
@@ -95,6 +199,7 @@ def inject_answerer_turns(
                 "group": role_str,
                 "auto_detected": True,
             })
+            last_injected_is_answerer = True
 
     return sorted(speakers + new_entries, key=lambda s: s["start"])
 

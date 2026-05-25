@@ -113,7 +113,7 @@ def test_bureaucrat_role_detected():
 
 
 def test_questioner_callback_not_inserted():
-    """『○○くん』(質問者復帰) は新 turn として挿入しない。"""
+    """直前に大臣 turn が無い『○○くん』は新 turn として挿入しない (単独の議員指名)。"""
     speakers = [
         {"start": 100.0, "name": "委員長甲", "group": "内閣委員長"},
         {"start": 1000.0, "name": "乙田", "group": "Q党"},
@@ -124,6 +124,92 @@ def test_questioner_callback_not_inserted():
     out = inject_answerer_turns(speakers, cues)
     # 元 speakers のみ
     assert len(out) == 2
+
+
+def test_questioner_address_in_long_cue_skipped():
+    """『○○大臣、質問します』『私から○○大臣にお伺いします』のように
+    長い文中で議員が大臣を呼びかけるケースは委員長アナウンスではないので除外。
+
+    指摘: 既存実装はこれを答弁者 turn として挿入してしまい、再質問テキストが
+    大臣セクションに入る誤帰属を生んでいた (回帰防止)。"""
+    speakers = [
+        {"start": 100.0, "name": "委員長甲", "group": "内閣委員長"},
+        {"start": 200.0, "name": "乙田", "group": "Q党"},
+    ]
+    # 質問者が大臣を呼びかけ + 質問本文を続ける (長い cue、call は文中)
+    cues = [
+        {"start": 250.0, "end": 260.0,
+         "text": "まず政策の根本について、甲野大臣にお伺いしたいと思います。"
+                 "今般の改正案の趣旨をご説明ください"},
+    ]
+    out = inject_answerer_turns(speakers, cues)
+    auto = [s for s in out if s.get("auto_detected")]
+    # 長文中の呼びかけは委員長アナウンスではないので新 turn を入れない
+    assert len(auto) == 0
+
+
+def test_return_after_minister_turn_injects_questioner_return():
+    """委員長アナウンス → 大臣 turn → `_return` (○○くん) で質問者に戻る turn を挿入。
+
+    指摘: `_return` を skip しているため、大臣 turn が次の公式 speaker まで続き
+    再質問が大臣セクションに入る誤帰属が出る (回帰防止)。"""
+    speakers = [
+        {"start": 100.0, "name": "委員長甲", "group": "内閣委員長"},
+        {"start": 200.0, "name": "乙田太郎", "group": "Q党"},  # フルネーム
+    ]
+    cues = [
+        # 委員長が大臣を指名 (短い cue → chair intro 判定)
+        {"start": 300.0, "end": 302.0, "text": "甲野大臣。"},
+        # 大臣の答弁 (本文は不要、cue は省略可)
+        # 委員長が質問者に戻す (○○くん = _return)
+        {"start": 500.0, "end": 502.0, "text": "乙田くん。"},
+    ]
+    out = inject_answerer_turns(speakers, cues)
+    auto = [s for s in out if s.get("auto_detected")]
+    # 大臣 1 + 質問者復帰 1 = 2 turn
+    assert len(auto) == 2
+    # 大臣 turn
+    minister = [s for s in auto if s.get("group") == "大臣"]
+    assert len(minister) == 1
+    assert minister[0]["name"] == "甲野"
+    # 質問者復帰 turn
+    returns = [s for s in auto if s.get("return_to_questioner")]
+    assert len(returns) == 1
+    # フルネーム (公式 speaker の name) で戻る
+    assert returns[0]["name"] == "乙田太郎"
+    # 時刻順
+    assert returns[0]["start"] > minister[0]["start"]
+
+
+def test_return_without_prior_minister_turn_is_ignored():
+    """直前に大臣 turn が無い `_return` は (単独の議員指名 / 質問順序のアナウンス
+    と区別がつかないので) turn を入れない。"""
+    speakers = [
+        {"start": 100.0, "name": "委員長甲", "group": "内閣委員長"},
+        {"start": 1000.0, "name": "乙田太郎", "group": "Q党"},
+    ]
+    cues = [{"start": 200.0, "end": 202.0, "text": "乙田くん。"}]
+    out = inject_answerer_turns(speakers, cues)
+    auto = [s for s in out if s.get("auto_detected")]
+    assert len(auto) == 0
+
+
+def test_return_with_no_matching_questioner_is_ignored():
+    """`_return` の姓が公式 speakers に居ないなら何もしない (誰に戻すか不明)。"""
+    speakers = [
+        {"start": 100.0, "name": "委員長甲", "group": "内閣委員長"},
+        {"start": 200.0, "name": "乙田太郎", "group": "Q党"},
+    ]
+    cues = [
+        {"start": 300.0, "end": 302.0, "text": "甲野大臣。"},
+        # 公式 speakers に居ない『戊野』に戻す → 無視
+        {"start": 500.0, "end": 502.0, "text": "戊野くん。"},
+    ]
+    out = inject_answerer_turns(speakers, cues)
+    auto = [s for s in out if s.get("auto_detected")]
+    # 大臣 turn のみ、質問者復帰 turn は無い
+    assert len(auto) == 1
+    assert auto[0].get("group") == "大臣"
 
 
 def test_preserves_original_order_and_fields():

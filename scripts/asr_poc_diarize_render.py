@@ -42,17 +42,40 @@ from collections import defaultdict
 from pathlib import Path
 
 
+def _identify_common_answerer_clusters(
+    cues: list[dict],
+    official_speakers: list[dict],
+    *,
+    min_slots: int = 3,
+) -> set[int]:
+    """N 個以上の議員枠に跨がって出現する cluster を「共通答弁者 (大臣・参考人)」
+    候補として返す。
+
+    これを先に確定して dominant 計算から除外しないと、答弁者 cluster が最初の
+    議員枠の primary に取られて、その議員自身の cluster が「○○ 枠内答弁者」扱い
+    に化ける。
+    """
+    appearance = _cluster_appearance_slots(cues, official_speakers)
+    return {cid for cid, slots in appearance.items() if len(slots) >= min_slots}
+
+
 def _identify_dominant_cluster_per_member_slot(
     cues: list[dict],
     official_speakers: list[dict],
+    *,
+    exclude_clusters: set[int] | None = None,
 ) -> dict[int, dict]:
     """公式議員の時間枠ごとに、支配的 cluster (最も発話時間が長い cluster) を
     その議員本人と同定する。
+
+    ``exclude_clusters`` に共通答弁者 cluster を渡すと、それらは dominant 候補から
+    除外される。複数枠で答弁する大臣 cluster が最初の議員枠を奪うのを防ぐ。
 
     Returns:
         {cluster_id: {"matched_speaker": {...議員 dict...}, "dominance": "primary"}}
         primary とマッチしなかった cluster は呼び出し側で別扱い (議員枠内の非議員話者)。
     """
+    exclude = exclude_clusters or set()
     sorted_sp = sorted(official_speakers, key=lambda s: s["start"])
     slots: list[tuple[float, float, dict]] = []
     for i, s in enumerate(sorted_sp):
@@ -61,13 +84,13 @@ def _identify_dominant_cluster_per_member_slot(
         )
         slots.append((s["start"], end, s))
 
-    # 各議員枠内の cluster ごと発話時間 を集計
-    dominant_by_slot: list[tuple[int | None, float]] = []  # 各 slot の (cluster_id, time)
+    # 各議員枠内の cluster ごと発話時間 を集計 (答弁者 cluster は除外)
+    dominant_by_slot: list[tuple[int | None, float]] = []
     for s_start, s_end, s in slots:
         cluster_time: dict[int, float] = {}
         for c in cues:
             sp = c.get("speaker_id")
-            if sp is None:
+            if sp is None or sp in exclude:
                 continue
             cs = float(c["start"])
             ce = float(c.get("end", cs))
@@ -150,14 +173,20 @@ def _merge_tiny_clusters_into_slot_dominant(
     *,
     min_cues: int,
     min_duration: float,
+    exclude_clusters: set[int] | None = None,
 ) -> list[dict]:
     """非支配 cluster で発話量が閾値未満のものを、その cue が属する議員枠の
     支配的 cluster に書き換える (同じ議員の音響的揺らぎを救う)。
+
+    ``exclude_clusters`` (共通答弁者 cluster) は merge 先の候補から除外する。
+    これがないと、答弁者 cluster が slot 内で最も発話時間が長いケースで、
+    短い質問者 cluster がそこへ吸収されてしまう。
 
     返り値は新 cue 列 (元 cue は変更しない)。
     """
     if not official_speakers:
         return cues
+    exclude = exclude_clusters or set()
     sorted_sp = sorted(official_speakers, key=lambda s: s["start"])
     # 議員枠の [start, end) を計算
     slot_ranges: list[tuple[float, float, int]] = []
@@ -167,17 +196,20 @@ def _merge_tiny_clusters_into_slot_dominant(
         )
         slot_ranges.append((sorted_sp[i]["start"], end, i))
 
-    dominant = _identify_dominant_cluster_per_member_slot(cues, official_speakers)
+    dominant = _identify_dominant_cluster_per_member_slot(
+        cues, official_speakers, exclude_clusters=exclude,
+    )
     # cluster_id → dominant_in_slots (どの slot index で支配的か)
     dominant_slot_of: dict[int, set[int]] = {}
     for sp_id in dominant:
         dominant_slot_of[sp_id] = set()
     # dominant() は cluster→matched_speaker 形式なので、slot index も取り直す
+    # 答弁者 cluster は除外して「議員 (質問者) の dominant」を再計算
     for s_start, s_end, idx in slot_ranges:
         cluster_time: dict[int, float] = {}
         for c in cues:
             sp = c.get("speaker_id")
-            if sp is None:
+            if sp is None or sp in exclude:
                 continue
             cs = float(c["start"])
             ce = float(c.get("end", cs))
@@ -318,14 +350,25 @@ def _build_cluster_speakers(
     if not official_speakers:
         return [], sorted_cues
 
-    # 1. 小さい非支配 cluster を支配 cluster に統合
+    # 0. 先に「共通答弁者」cluster (大臣・参考人) を特定。これがないと
+    #    答弁者 cluster が議員枠の primary を奪い、議員自身の cluster が
+    #    「○○ 枠内答弁者」に化ける。
+    answerer_clusters = _identify_common_answerer_clusters(
+        sorted_cues, official_speakers, min_slots=3,
+    )
+
+    # 1. 小さい非支配 cluster を「答弁者を除く」slot dominant に統合
     refined_cues = _merge_tiny_clusters_into_slot_dominant(
         sorted_cues, official_speakers,
         min_cues=min_secondary_cues,
         min_duration=min_secondary_duration,
+        exclude_clusters=answerer_clusters,
     )
 
-    dominant = _identify_dominant_cluster_per_member_slot(refined_cues, official_speakers)
+    # 2. 議員枠の primary は答弁者 cluster を除外して再計算
+    dominant = _identify_dominant_cluster_per_member_slot(
+        refined_cues, official_speakers, exclude_clusters=answerer_clusters,
+    )
     appearance = _cluster_appearance_slots(refined_cues, official_speakers)
     sorted_sp = sorted(official_speakers, key=lambda s: s["start"])
 

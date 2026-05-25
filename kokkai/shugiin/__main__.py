@@ -331,6 +331,12 @@ def _run_phase3(args: argparse.Namespace) -> tuple[Path, dict, dict]:
         info(f"[answerer] 議員名簿で正規化: {n_norm} entry (姓のみ → フルネーム)")
     stats["answerer_names_normalized"] = n_norm
 
+    # 検出した答弁者を meta["speakers"] に反映させて以降の出力 (meta.json /
+    # --json / --jsonl) でも source of truth を 1 本化する。これがないと
+    # HTML は答弁者付き / meta.json は元の質問者のみ、となり kkcap search の
+    # 発言者再計算と HTML の表示が食い違う。
+    meta["speakers"] = augmented_speakers
+
     # cue → 発言者振り分け → 各発言者内で文単位マージ
     groups = assign_cues_to_speakers(cues, augmented_speakers)
     total_after = 0

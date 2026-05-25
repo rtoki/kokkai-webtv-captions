@@ -68,3 +68,6 @@ blog.md
 
 # 公開前セルフチェック用 (公開リポには含めない、手元のみ)
 scripts/check_publication_risk.py
+
+# Agent 動作指針 (手元限定、公開しない)
+CLAUDE.md
