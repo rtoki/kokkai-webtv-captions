@@ -303,8 +303,18 @@ def _run_phase3(args: argparse.Namespace) -> tuple[Path, dict, dict]:
         info(f"[preclean] degenerate loop {n_loops} 件を [音声不明瞭] に置換")
     stats["preclean_loops"] = n_loops
 
+    # 公式 meta の speakers は質問者の議員のみ。委員長セクション内の cue から
+    # 大臣 / 政府参考人 / 提出者 等の答弁者を SudachiPy で検出して speakers に
+    # 新 turn として挿入する (参議院側 sangiin.detect の役職判定を再利用)。
+    from .answerer import inject_answerer_turns
+    augmented_speakers = inject_answerer_turns(meta["speakers"], cues)
+    n_injected = len(augmented_speakers) - len(meta["speakers"])
+    if n_injected:
+        info(f"[answerer] 答弁者を検出: {n_injected} turn 追加 (大臣/政府参考人/提出者 等)")
+    stats["answerer_turns_injected"] = n_injected
+
     # cue → 発言者振り分け → 各発言者内で文単位マージ
-    groups = assign_cues_to_speakers(cues, meta["speakers"])
+    groups = assign_cues_to_speakers(cues, augmented_speakers)
     total_after = 0
     for g in groups:
         g["cues"] = merge_cues_into_sentences(g["cues"])
