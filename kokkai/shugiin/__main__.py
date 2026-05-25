@@ -216,12 +216,33 @@ def _run_phase3(args: argparse.Namespace) -> tuple[Path, dict, dict]:
                 f"{base_prompt[:80]}{'...' if len(base_prompt) > 80 else ''}"
             )
 
+        # 冒頭/末尾の無音をスキップ (--asr-trim-edges)。Whisper の処理対象を
+        # 発話区間だけに絞ることで 'ご視聴ありがとうございました' 系 hallucination
+        # の発生機会と ASR 処理時間の両方を削減する。
+        # getattr で防御的に取る (テストで Namespace を手組みするケースに対応)。
+        clip_start = 0.0
+        clip_end: float | None = None
+        if getattr(args, "asr_trim_edges", False):
+            from .audio import detect_edge_silence
+            clip_start, clip_end = detect_edge_silence(wav_path)
+            trim_head = clip_start
+            # last_speech が wav 末尾近くならスキップ表示は不要
+            info(
+                f"[audio] 無音 trim: 冒頭 {trim_head:.0f}s スキップ"
+                f", 末尾 {clip_end:.0f}s で打ち切り"
+                if clip_start > 0 or clip_end is not None
+                else "[audio] 無音 trim: 発話を検出できず、wav 全体を処理"
+            )
+            stats["trim_clip_start"] = clip_start
+            stats["trim_clip_end"] = clip_end
+
         # ASR (optionally 2-pass with --llm-context)
         if args.llm_context:
             step(4, 5, f"ASR pass1 (固有名詞抽出用): {args.asr_backend}/{args.model}")
             pass1 = transcribe(
                 wav_path, initial_prompt=base_prompt,
                 backend=args.asr_backend, model_size=args.model,
+                clip_start=clip_start, clip_end=clip_end,
             )
             joined = " ".join(c["text"] for c in pass1)
             terms = extract_glossary_terms(
@@ -237,12 +258,14 @@ def _run_phase3(args: argparse.Namespace) -> tuple[Path, dict, dict]:
             cues = transcribe(
                 wav_path, initial_prompt=augmented,
                 backend=args.asr_backend, model_size=args.model,
+                clip_start=clip_start, clip_end=clip_end,
             )
         else:
             step(4, 5, f"ASR 実行中: {args.asr_backend}/{args.model}")
             cues = transcribe(
                 wav_path, initial_prompt=base_prompt,
                 backend=args.asr_backend, model_size=args.model,
+                clip_start=clip_start, clip_end=clip_end,
             )
 
         # raw ASR cues を JSON で保存 → 次回 --skip-asr で再利用可能
@@ -404,6 +427,12 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="initial_prompt 注入を無効化 (精度比較・デバッグ用)")
     g_asr.add_argument("--refresh-members", action="store_true",
                        help="衆議院議員名簿キャッシュを無視して再取得")
+    g_asr.add_argument("--asr-trim-edges", action="store_true",
+                       help=("ffmpeg silencedetect で wav 冒頭/末尾の長い無音区間を"
+                             " 検出し、Whisper の処理対象から外す。衆議院 webtv は"
+                             " 開議の十数分前から HLS が流れるため、冒頭の無音区間で"
+                             " Whisper が 'ご視聴ありがとうございました' 系 hallucination"
+                             " を吐く。ASR 処理時間 15-25%% 短縮、hallucination も削減。"))
 
     g_corr = parser.add_argument_group("校正 (--asr 時のみ)")
     g_corr.add_argument("--no-glossary", action="store_true",

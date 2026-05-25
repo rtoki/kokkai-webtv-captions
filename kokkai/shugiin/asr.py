@@ -127,8 +127,16 @@ def _transcribe_mlx(
     initial_prompt: str | None,
     model_id: str,
     language: str,
+    *,
+    clip_start: float = 0.0,
+    clip_end: float | None = None,
 ) -> list[dict]:
-    """mlx-whisper を subprocess で実行し JSON segments を cue リストに変換する。"""
+    """mlx-whisper を subprocess で実行し JSON segments を cue リストに変換する。
+
+    ``clip_start`` / ``clip_end`` を指定すると mlx-whisper の ``--clip-timestamps``
+    を介して処理対象を時刻範囲に絞れる (冒頭/末尾の長尺無音をスキップする用途)。
+    cue の start/end は元 wav 上の絶対時刻なのでオフセット調整は不要。
+    """
     from ..errors import AsrError
     from ._models import ensure_model_downloaded
 
@@ -158,6 +166,12 @@ def _transcribe_mlx(
         cmd += ["--initial-prompt", initial_prompt]
     if language and language.lower() not in ("auto", "none", ""):
         cmd += ["--language", language]
+    # 冒頭/末尾の無音スキップ。clip_end=None なら end-of-audio まで。
+    if clip_start > 0.0 or clip_end is not None:
+        clip_value = f"{clip_start:.2f}"
+        if clip_end is not None:
+            clip_value += f",{clip_end:.2f}"
+        cmd += ["--clip-timestamps", clip_value]
     cmd.append(str(wav_path))
 
     print(f"[asr] mlx_whisper 起動: {model_id}", file=sys.stderr)
@@ -190,6 +204,8 @@ def transcribe(
     compute_type: str = "auto",
     device: str = "auto",
     beam_size: int = 5,
+    clip_start: float = 0.0,
+    clip_end: float | None = None,
 ) -> list[dict]:
     """
     wav を Whisper で文字起こしして cue リストを返す。
@@ -202,6 +218,11 @@ def transcribe(
                     mlx: ``mlx-community/whisper-large-v3-turbo`` 等
         language: "ja" 固定推奨 (自動言語判定は不要)
         compute_type, device, beam_size: faster backend 専用
+        clip_start: 処理開始時刻 (秒、wav 先頭からのオフセット)。0.0 で先頭から。
+        clip_end: 処理終了時刻 (秒)。None で wav 末尾まで。``clip_start`` と組み合わせて
+            冒頭/末尾の長尺無音を Whisper の処理対象から外す (``audio.detect_edge_silence``
+            と併用)。cue の start/end は元 wav 上の絶対時刻なので、後段で
+            オフセット調整は不要。
 
     Returns:
         ``[{"start": float, "end": float, "text": str}, ...]`` (時刻昇順)
@@ -213,7 +234,10 @@ def transcribe(
 
     if backend == "mlx":
         model_id = model_size if "/" in model_size else DEFAULT_MLX_MODEL
-        return _transcribe_mlx(wav_path, initial_prompt, model_id, language)
+        return _transcribe_mlx(
+            wav_path, initial_prompt, model_id, language,
+            clip_start=clip_start, clip_end=clip_end,
+        )
 
     WhisperModel = _load_faster_whisper()
     # 初回 DL 前に Y/N (対話 TTY のみ)。model_size が "turbo" 等のショート名なら
@@ -247,6 +271,17 @@ def transcribe(
     # - compression_ratio_threshold=2.0 (default 2.4 から引き締め): chunk 出力の
     #   gzip 圧縮率が高い (=繰り返しが多い) ものは hallucination とみなして
     #   再生成 or 破棄させる。
+    # 冒頭/末尾の無音をスキップ (audio.detect_edge_silence で得た範囲を渡す)。
+    # faster-whisper の clip_timestamps は "start,end" / "start" 形式の文字列。
+    # cue start/end は元 wav 上の絶対時刻なので、後段の調整は不要。
+    if clip_start > 0.0 or clip_end is not None:
+        clip_timestamps = (
+            f"{clip_start:.2f},{clip_end:.2f}" if clip_end is not None
+            else f"{clip_start:.2f}"
+        )
+    else:
+        clip_timestamps = "0"
+
     segments, info = model.transcribe(
         str(wav_path),
         language=language,
@@ -257,6 +292,7 @@ def transcribe(
         condition_on_previous_text=False,
         no_repeat_ngram_size=5,
         compression_ratio_threshold=2.0,
+        clip_timestamps=clip_timestamps,
     )
 
     print(
