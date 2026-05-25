@@ -25,6 +25,8 @@ HTML 上に自動的に答弁者ごとのセクションが生まれる。
 
 from __future__ import annotations
 
+from collections import defaultdict
+
 from kokkai.sangiin.detect import classify_role_str, detect_speaker_calls
 
 
@@ -95,3 +97,86 @@ def inject_answerer_turns(
             })
 
     return sorted(speakers + new_entries, key=lambda s: s["start"])
+
+
+def normalize_answerer_names(
+    speakers: list[dict],
+    members: list[dict],
+    *,
+    only_auto_detected: bool = True,
+) -> tuple[list[dict], int]:
+    """``inject_answerer_turns`` で検出した答弁者 (大臣・副大臣・政務官・提出者
+    等の議員系) の name を、衆議院議員名簿で **フルネームに正規化** する。
+
+    背景: ASR が答弁者アナウンスを拾うとき、姓のみ (「山田」「伊藤」) しか
+    取れないことが多い。HTML 上で「山田 (副大臣)」「伊藤 (大臣)」のように姓
+    だけが表示されていると、誰なのか同定できない。``members.load_members()``
+    の議員名簿で姓ユニーク一致するなら、フルネームに置換する。
+
+    マッチ規則 (保守的):
+
+    1. ``name`` が議員名簿の ``name`` と完全一致 → 既に canonical、触らない。
+    2. ``name`` が 1-2 文字 (姓と推定) で議員名簿に同じ姓を持つ議員が
+       **1 名のみ** → そのフルネームに置換。
+    3. それ以外 (複数候補 / マッチ無し / 3 文字以上の不完全名) → そのまま。
+
+    候補が複数のとき (山田姓は複数の議員が居る等) は曖昧なので false positive
+    回避のために置換しない。
+
+    Args:
+        speakers: ``inject_answerer_turns`` 後の speakers リスト。
+        members: ``members.load_members()`` の返り値 (議員 dict のリスト)。
+        only_auto_detected: True なら ``auto_detected: True`` の entry のみ対象。
+            既存の公式メタ由来の議員 (元の質問者) は触らない。
+
+    Returns:
+        ``(新 speakers list, 正規化された entry 数)``。元の name は ``original_name``
+        フィールドに退避する。
+    """
+    if not speakers or not members:
+        return list(speakers), 0
+
+    # 議員名簿から (フルネーム集合, 姓→候補リスト) のインデックスを作る。
+    # 姓は name 先頭 1 文字 / 2 文字 の両方で引けるようにしておく。
+    by_full_name: set[str] = set()
+    by_surname_1: dict[str, list[str]] = defaultdict(list)
+    by_surname_2: dict[str, list[str]] = defaultdict(list)
+    for m in members:
+        full = (m.get("name") or "").strip()
+        if not full:
+            continue
+        by_full_name.add(full)
+        by_surname_1[full[:1]].append(full)
+        if len(full) >= 2:
+            by_surname_2[full[:2]].append(full)
+
+    out: list[dict] = []
+    n_normalized = 0
+    for s in speakers:
+        if only_auto_detected and not s.get("auto_detected"):
+            out.append(s)
+            continue
+        nm = (s.get("name") or "").strip()
+        if not nm:
+            out.append(s)
+            continue
+        # 既にフルネームなら触らない
+        if nm in by_full_name:
+            out.append(s)
+            continue
+        # 姓 (1-2 文字) 一致の候補を集める。長い方 (2 文字) を優先。
+        candidates: list[str] = []
+        if len(nm) == 2 and nm in by_surname_2:
+            candidates = by_surname_2[nm]
+        elif len(nm) == 1 and nm in by_surname_1:
+            candidates = by_surname_1[nm]
+        # 一意に決まるときだけ置換 (複数候補は曖昧なのでスキップ)
+        if len(candidates) == 1:
+            new = dict(s)
+            new["original_name"] = nm
+            new["name"] = candidates[0]
+            out.append(new)
+            n_normalized += 1
+        else:
+            out.append(s)
+    return out, n_normalized

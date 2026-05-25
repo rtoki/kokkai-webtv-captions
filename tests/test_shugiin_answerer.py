@@ -137,3 +137,94 @@ def test_preserves_original_order_and_fields():
     # 元 2 entry がそのまま (フィールド保持)
     assert {"start": 100.0, "name": "委員長甲", "group": "内閣委員長", "extra": "x"} in out
     assert {"start": 1000.0, "name": "乙田", "group": "Q党"} in out
+
+
+# ============================================================================
+# normalize_answerer_names のテスト
+# ============================================================================
+
+
+from kokkai.shugiin.answerer import normalize_answerer_names
+
+
+def test_normalize_unique_surname_match():
+    """姓のみ検出 (1-2 字) で議員名簿に候補 1 名 → フルネームに置換。"""
+    speakers = [{
+        "start": 100.0, "name": "甲野", "group": "大臣", "auto_detected": True,
+    }]
+    members = [
+        {"name": "甲野太郎"},
+        {"name": "乙田次郎"},
+    ]
+    out, n = normalize_answerer_names(speakers, members)
+    assert n == 1
+    assert out[0]["name"] == "甲野太郎"
+    assert out[0]["original_name"] == "甲野"
+
+
+def test_normalize_multiple_candidates_skipped():
+    """姓に複数候補 → 曖昧なので置換しない (false positive 回避)。"""
+    speakers = [{
+        "start": 100.0, "name": "甲野", "group": "大臣", "auto_detected": True,
+    }]
+    members = [
+        {"name": "甲野太郎"},
+        {"name": "甲野花子"},
+    ]
+    out, n = normalize_answerer_names(speakers, members)
+    assert n == 0
+    assert out[0]["name"] == "甲野"
+    assert "original_name" not in out[0]
+
+
+def test_normalize_full_name_untouched():
+    """既にフルネームなら触らない。"""
+    speakers = [{
+        "start": 100.0, "name": "甲野太郎", "group": "大臣", "auto_detected": True,
+    }]
+    members = [{"name": "甲野太郎"}]
+    out, n = normalize_answerer_names(speakers, members)
+    assert n == 0
+    assert out[0]["name"] == "甲野太郎"
+
+
+def test_normalize_no_match_kept():
+    """議員名簿にマッチしない姓はそのまま (政府参考人の官僚等)。"""
+    speakers = [{
+        "start": 100.0, "name": "丁原", "group": "局長", "auto_detected": True,
+    }]
+    members = [{"name": "甲野太郎"}, {"name": "乙田花子"}]
+    out, n = normalize_answerer_names(speakers, members)
+    assert n == 0
+    assert out[0]["name"] == "丁原"
+
+
+def test_normalize_skips_non_auto_detected():
+    """only_auto_detected=True (既定) なら公式メタ由来の議員は触らない。"""
+    speakers = [{"start": 100.0, "name": "甲野", "group": "Q党"}]
+    members = [{"name": "甲野太郎"}]
+    out, n = normalize_answerer_names(speakers, members)
+    assert n == 0
+    assert out[0]["name"] == "甲野"
+
+
+def test_normalize_empty_members():
+    """members が空 → 何もしない。"""
+    speakers = [{
+        "start": 100.0, "name": "甲野", "group": "大臣", "auto_detected": True,
+    }]
+    out, n = normalize_answerer_names(speakers, [])
+    assert n == 0
+    assert out == speakers
+
+
+def test_normalize_long_partial_name_not_changed():
+    """3 文字以上の不完全名 (e.g. 「甲野太」) は姓判定に乗らない。"""
+    speakers = [{
+        "start": 100.0, "name": "甲野太", "group": "大臣", "auto_detected": True,
+    }]
+    members = [{"name": "甲野太郎"}]
+    out, n = normalize_answerer_names(speakers, members)
+    # 3 文字は姓 (1-2 字) の範囲外なので保守的にスキップ
+    assert n == 0
+    assert out[0]["name"] == "甲野太"

@@ -306,12 +306,30 @@ def _run_phase3(args: argparse.Namespace) -> tuple[Path, dict, dict]:
     # 公式 meta の speakers は質問者の議員のみ。委員長セクション内の cue から
     # 大臣 / 政府参考人 / 提出者 等の答弁者を SudachiPy で検出して speakers に
     # 新 turn として挿入する (参議院側 sangiin.detect の役職判定を再利用)。
-    from .answerer import inject_answerer_turns
+    from .answerer import inject_answerer_turns, normalize_answerer_names
     augmented_speakers = inject_answerer_turns(meta["speakers"], cues)
     n_injected = len(augmented_speakers) - len(meta["speakers"])
     if n_injected:
         info(f"[answerer] 答弁者を検出: {n_injected} turn 追加 (大臣/政府参考人/提出者 等)")
     stats["answerer_turns_injected"] = n_injected
+
+    # 検出した答弁者は ASR で姓しか取れないことが多い (「山田 副大臣」「伊藤 大臣」)。
+    # 衆議院議員名簿で姓ユニーク一致するならフルネームに正規化する。
+    # --skip-asr パスでは members を取っていないので、ここで遅延取得する。
+    members_for_norm: list[dict]
+    try:
+        members_for_norm = load_members(
+            refresh=getattr(args, "refresh_members", False),
+        )
+    except Exception as e:
+        info(f"[answerer] load_members 失敗 ({e})、姓の正規化はスキップ")
+        members_for_norm = []
+    augmented_speakers, n_norm = normalize_answerer_names(
+        augmented_speakers, members_for_norm,
+    )
+    if n_norm:
+        info(f"[answerer] 議員名簿で正規化: {n_norm} entry (姓のみ → フルネーム)")
+    stats["answerer_names_normalized"] = n_norm
 
     # cue → 発言者振り分け → 各発言者内で文単位マージ
     groups = assign_cues_to_speakers(cues, augmented_speakers)
