@@ -386,17 +386,19 @@ def _build_parser() -> argparse.ArgumentParser:
     g_io.add_argument("-q", "--quiet", action="store_true",
                       help="進捗ログ (`[N/M]` 等) を stderr に出さない")
 
-    g_asr = parser.add_argument_group("ASR (Whisper)")
+    g_asr = parser.add_argument_group("ASR (Whisper / VibeVoice)")
     g_asr.add_argument("--asr", dest="asr", action="store_true", default=True,
                        help="ASR を実行して字幕付き HTML を生成 (既定で有効、要 [shugiin-asr] + ffmpeg)")
     g_asr.add_argument("--no-asr", dest="asr", action="store_false",
                        help="ASR を実行せず Phase 2 のタイムラインのみ生成")
-    g_asr.add_argument("--asr-backend", choices=["faster", "mlx"], default=None,
+    g_asr.add_argument("--asr-backend", choices=["faster", "mlx", "vibevoice"], default=None,
                        help=("ASR backend (省略時は Apple Silicon + mlx_whisper 利用可なら "
-                             "mlx、それ以外は faster を自動選択)"))
+                             "mlx、それ以外は faster を自動選択)。vibevoice は "
+                             "Microsoft VibeVoice-ASR (要 [shugiin-asr-vibevoice]、CUDA GPU 推奨)"))
     g_asr.add_argument("--model", default="turbo",
-                       help=("Whisper モデル (faster: turbo/large-v3/medium/small/base/tiny..., "
-                             "mlx: HF model id)。tiny/base は CPU 機・低スペック向け"))
+                       help=("ASR モデル (faster: turbo/large-v3/medium/small/base/tiny..., "
+                             "mlx / vibevoice: HF model id)。tiny/base は CPU 機・低スペック向け。"
+                             "vibevoice の既定は microsoft/VibeVoice-ASR-HF"))
     g_asr.add_argument("--skip-asr", action="store_true",
                        help=("ASR を実行せず <base>_transcript.json (前回 ASR 結果) を再利用。"
                              " 強い機で 1 回 ASR → 弱い機で HTML 再生成、glossary 更新後の再 render 等"))

@@ -1,11 +1,14 @@
 """
-Whisper による wav 文字起こし + 公式発言者リストへの cue 割付。
+wav 文字起こし (Whisper / VibeVoice) + 公式発言者リストへの cue 割付。
 
 サポート backend:
 - ``faster`` (既定): ``faster-whisper`` の Whisper turbo。CPU/Metal/CUDA portable。
 - ``mlx``: ``mlx-whisper`` を subprocess で起動。Apple Silicon でより速い。
+- ``vibevoice``: Microsoft VibeVoice-ASR (HF transformers >= 5.3)。7B クラスの
+  長時間 ASR で、60 分までの音声を 1 パスで転写する。CUDA GPU 推奨。
 
 ``initial_prompt`` は ``kokkai.shugiin.hints.build_initial_prompt`` で構築する。
+vibevoice backend では initial_prompt を context prompt (hotwords 相当) として渡す。
 
 公開関数:
 - ``transcribe(wav, initial_prompt=None, backend="faster", model_size="turbo", ...) -> list[dict]``
@@ -23,11 +26,17 @@ import sys
 from pathlib import Path
 
 
-ASR_BACKENDS = ("faster", "mlx")
+ASR_BACKENDS = ("faster", "mlx", "vibevoice")
 # ライブラリ層の portable default。CLI 既定は recommended_asr_backend() で
 # Apple Silicon なら "mlx" に切り替わる。
 DEFAULT_ASR_BACKEND = "faster"
 DEFAULT_MLX_MODEL = "mlx-community/whisper-large-v3-turbo"
+DEFAULT_VIBEVOICE_MODEL = "microsoft/VibeVoice-ASR-HF"
+
+# VibeVoice-ASR の入力仕様: 24kHz mono、最長 60 分 / 64K トークン。
+# 国会の会議は数時間になるので、上限に余裕を見た chunk に分割して順に流す。
+VIBEVOICE_SAMPLE_RATE = 24000
+VIBEVOICE_CHUNK_SEC = 3000  # 50 分
 
 # faster-whisper の model_size → HF repo_id (cache 存在確認に使う)。
 # faster_whisper.utils._MODELS と同じ内容のフリーズコピー (private API への依存を
@@ -51,6 +60,7 @@ _FASTER_MODEL_REPOS = {
 
 # 既知モデルの目安サイズ (Y/N プロンプトで表示)。
 _KNOWN_MODEL_SIZES = {
+    "microsoft/VibeVoice-ASR-HF": "18 GB",
     "mlx-community/whisper-large-v3-turbo": "1.5 GB",
     "mobiuslabsgmbh/faster-whisper-large-v3-turbo": "1.5 GB",
     "Systran/faster-whisper-large-v3": "3 GB",
@@ -180,6 +190,189 @@ def _transcribe_mlx(
     return cues
 
 
+def _load_vibevoice():
+    """transformers (VibeVoice-ASR 統合版) の遅延 import。"""
+    from ..errors import MissingToolError
+    try:
+        import torch  # noqa: F401
+        from transformers import AutoProcessor, VibeVoiceAsrForConditionalGeneration
+    except ImportError as e:
+        raise MissingToolError(
+            "vibevoice backend には transformers >= 5.3 と torch が必要です。\n"
+            "  uv pip install -e \".[shugiin-asr-vibevoice]\"\n"
+            "または\n"
+            "  pip install -e \".[shugiin-asr-vibevoice]\"\n"
+            "(transformers が古い場合は `pip install -U 'transformers>=5.3'` で更新)"
+        ) from e
+    return AutoProcessor, VibeVoiceAsrForConditionalGeneration
+
+
+def _wav_duration_sec(wav_path: Path) -> float:
+    """PCM wav の長さ (秒)。標準 ``wave`` モジュールのみ使用。"""
+    import wave
+    with wave.open(str(wav_path), "rb") as w:
+        return w.getnframes() / float(w.getframerate())
+
+
+def _ffmpeg_run(cmd: list[str], what: str) -> None:
+    from ..errors import AsrError
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise AsrError(
+            f"{what} に失敗しました (ffmpeg returncode={proc.returncode}):\n"
+            f"  stderr: {proc.stderr.strip()[:500]}"
+        )
+
+
+def _prepare_vibevoice_wav(wav_path: Path) -> Path:
+    """パイプラインの 16kHz wav を VibeVoice 用の 24kHz mono wav に変換する。
+
+    ``<stem>_24k.wav`` として wav と同じディレクトリにキャッシュし、
+    既に存在すれば再利用する (hls_to_wav の wav キャッシュと同じ流儀)。
+    """
+    from .audio import ensure_ffmpeg
+    ensure_ffmpeg()
+    out = wav_path.with_name(wav_path.stem + "_24k.wav")
+    if out.exists():
+        print(f"[asr] 24kHz wav キャッシュを使用: {out.name}", file=sys.stderr)
+        return out
+    print(f"[asr] {VIBEVOICE_SAMPLE_RATE}Hz mono に変換中 (VibeVoice 入力仕様)", file=sys.stderr)
+    _ffmpeg_run(
+        [
+            "ffmpeg", "-loglevel", "error", "-nostdin", "-y",
+            "-i", str(wav_path),
+            "-ac", "1", "-ar", str(VIBEVOICE_SAMPLE_RATE),
+            "-c:a", "pcm_s16le",
+            str(out),
+        ],
+        "24kHz への resample",
+    )
+    return out
+
+
+def _split_wav_chunks(wav_path: Path, chunk_sec: int = VIBEVOICE_CHUNK_SEC) -> list[Path]:
+    """wav を chunk_sec 単位に分割して chunk パスのリストを返す。
+
+    モデル上限 (60 分) 以内ならそのまま 1 要素で返す。分割は ffmpeg の
+    segment muxer (`-c copy`) で行うので PCM の再エンコードは走らない。
+    chunk 境界で文が切れることは許容する (Whisper backend の VAD chunk と
+    同様、後段の merge_cues_into_sentences で吸収される)。
+    """
+    from ..errors import AsrError
+    if _wav_duration_sec(wav_path) <= chunk_sec:
+        return [wav_path]
+    chunk_dir = wav_path.with_name(wav_path.stem + "_chunks")
+    chunk_dir.mkdir(exist_ok=True)
+    pattern = chunk_dir / "chunk_%04d.wav"
+    print(f"[asr] {chunk_sec // 60} 分単位に分割中 (VibeVoice の 60 分上限対応)", file=sys.stderr)
+    _ffmpeg_run(
+        [
+            "ffmpeg", "-loglevel", "error", "-nostdin", "-y",
+            "-i", str(wav_path),
+            "-f", "segment", "-segment_time", str(chunk_sec),
+            "-c", "copy",
+            str(pattern),
+        ],
+        "wav の chunk 分割",
+    )
+    chunks = sorted(chunk_dir.glob("chunk_*.wav"))
+    if not chunks:
+        raise AsrError(f"wav の chunk 分割結果が空です: {chunk_dir}")
+    return chunks
+
+
+def _vibevoice_segments_to_cues(segments: list, offset: float = 0.0) -> list[dict]:
+    """VibeVoice の parsed segment を cue リストに変換する。
+
+    parsed 形式は ``{"Start": float, "End": float, "Speaker": ..., "Content": str}``。
+    Speaker (モデルの話者分離結果) はここでは捨てる — 発言者の帰属は公式
+    発言者リスト (assign_cues_to_speakers) が一次ソースなので二重管理しない。
+    """
+    cues: list[dict] = []
+    for seg in segments:
+        if not isinstance(seg, dict):
+            continue
+        text = str(seg.get("Content") or "").strip()
+        if not text:
+            continue
+        try:
+            start = float(seg.get("Start", 0.0))
+        except (TypeError, ValueError):
+            continue
+        try:
+            end = float(seg.get("End", start))
+        except (TypeError, ValueError):
+            end = start
+        cues.append({"start": start + offset, "end": end + offset, "text": text})
+    cues.sort(key=lambda c: c["start"])
+    return cues
+
+
+def _transcribe_vibevoice(
+    wav_path: Path,
+    initial_prompt: str | None,
+    model_id: str,
+    language: str,
+) -> list[dict]:
+    """VibeVoice-ASR (HF transformers) で文字起こしして cue リストを返す。
+
+    - 言語は自動判定 (50+ 言語対応) なので ``language`` は使わない。
+    - ``initial_prompt`` は context prompt (hotwords 相当) として渡す。
+    - 60 分超の音声は VIBEVOICE_CHUNK_SEC 単位の chunk に分割し、
+      chunk ごとのタイムスタンプに累積 offset を足して連結する。
+    """
+    from ..errors import AsrError
+    from ._models import ensure_model_downloaded
+
+    AutoProcessor, VibeVoiceAsrForConditionalGeneration = _load_vibevoice()
+    ensure_model_downloaded(
+        model_id,
+        label="asr",
+        size_hint=_KNOWN_MODEL_SIZES.get(model_id),
+    )
+
+    wav24k = _prepare_vibevoice_wav(wav_path)
+    chunks = _split_wav_chunks(wav24k)
+
+    print(f"[asr] VibeVoice モデルロード中: {model_id}", file=sys.stderr)
+    processor = AutoProcessor.from_pretrained(model_id)
+    model = VibeVoiceAsrForConditionalGeneration.from_pretrained(
+        model_id, dtype="auto", device_map="auto",
+    )
+
+    print(
+        f"[asr] 文字起こし開始 (vibevoice): {wav_path.name}"
+        f" / {len(chunks)} chunk"
+        f"{' (hint あり)' if initial_prompt else ' (hint なし)'}",
+        file=sys.stderr,
+    )
+
+    cues: list[dict] = []
+    offset = 0.0
+    for i, chunk in enumerate(chunks, 1):
+        if len(chunks) > 1:
+            print(f"[asr]   chunk {i}/{len(chunks)} ({int(offset) // 60} 分〜)", file=sys.stderr)
+        kwargs = {"prompt": initial_prompt} if initial_prompt else {}
+        inputs = processor.apply_transcription_request(
+            audio=str(chunk), **kwargs,
+        ).to(model.device, model.dtype)
+        output_ids = model.generate(**inputs, max_new_tokens=32768, do_sample=False)
+        generated_ids = output_ids[:, inputs["input_ids"].shape[1]:]
+        decoded = processor.decode(generated_ids, return_format="parsed")
+        # decode は batch ごとの list を返す (batch=1 なので先頭)。古い/将来の
+        # transformers で segment list が直接返るケースも許容する。
+        segments = decoded[0] if decoded and isinstance(decoded[0], list) else decoded
+        if not isinstance(segments, list):
+            raise AsrError(
+                f"VibeVoice の parsed 出力を解釈できません: {type(segments).__name__}"
+            )
+        cues.extend(_vibevoice_segments_to_cues(segments, offset=offset))
+        offset += _wav_duration_sec(chunk)
+
+    print(f"[asr] 完了 (vibevoice): cue数={len(cues)}", file=sys.stderr)
+    return cues
+
+
 def transcribe(
     wav_path: Path,
     initial_prompt: str | None = None,
@@ -192,15 +385,19 @@ def transcribe(
     beam_size: int = 5,
 ) -> list[dict]:
     """
-    wav を Whisper で文字起こしして cue リストを返す。
+    wav を文字起こしして cue リストを返す。
 
     Args:
         wav_path: 16kHz mono wav (audio.hls_to_wav の出力)
-        initial_prompt: bias 用プロンプト (None なら hint 無し)
+        initial_prompt: bias 用プロンプト (None なら hint 無し)。
+                        vibevoice では context prompt (hotwords 相当) として渡る
         backend: ``faster`` (CPU/Metal/CUDA portable) / ``mlx`` (Apple Silicon ネイティブ)
+                 / ``vibevoice`` (VibeVoice-ASR、CUDA GPU 推奨)
         model_size: モデル名。faster: ``turbo``/``large-v3``/``medium`` 等、
-                    mlx: ``mlx-community/whisper-large-v3-turbo`` 等
-        language: "ja" 固定推奨 (自動言語判定は不要)
+                    mlx: ``mlx-community/whisper-large-v3-turbo`` 等、
+                    vibevoice: ``microsoft/VibeVoice-ASR-HF`` (既定)。
+                    ``org/name`` を含まない値は各 backend の既定モデルになる
+        language: "ja" 固定推奨 (vibevoice は自動判定のため未使用)
         compute_type, device, beam_size: faster backend 専用
 
     Returns:
@@ -214,6 +411,10 @@ def transcribe(
     if backend == "mlx":
         model_id = model_size if "/" in model_size else DEFAULT_MLX_MODEL
         return _transcribe_mlx(wav_path, initial_prompt, model_id, language)
+
+    if backend == "vibevoice":
+        model_id = model_size if "/" in model_size else DEFAULT_VIBEVOICE_MODEL
+        return _transcribe_vibevoice(wav_path, initial_prompt, model_id, language)
 
     WhisperModel = _load_faster_whisper()
     # 初回 DL 前に Y/N (対話 TTY のみ)。model_size が "turbo" 等のショート名なら

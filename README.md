@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)]()
-[![ASR](https://img.shields.io/badge/ASR-faster--whisper%20%7C%20mlx--whisper-orange)]()
+[![ASR](https://img.shields.io/badge/ASR-faster--whisper%20%7C%20mlx--whisper%20%7C%20VibeVoice--ASR-orange)]()
 [![LLM](https://img.shields.io/badge/LLM-mlx%20%7C%20openai%20compat-purple)]()
 
 ![screenshot](docs/screenshot.png)
@@ -71,6 +71,7 @@ $ kkcap sangiin 8955 --jsonl
 | 形態素解析 (sangiin の発言者検出) | `sudachipy` + `sudachidict_core` | コア依存。辞書 ~80MB |
 | ASR (`--asr`、`faster` backend) | `faster-whisper` | CTranslate2 ベース。Mac/Linux 共通 |
 | ASR (`--asr-backend mlx`) | `mlx-whisper` (subprocess) | Apple Silicon ネイティブ、高速 |
+| ASR (`--asr-backend vibevoice`) | `transformers>=5.3` + `torch` + `accelerate` + `librosa` | Microsoft VibeVoice-ASR (7B クラス)。60 分 1-pass の長時間 ASR。CUDA GPU 推奨 |
 | LLM 校正 (`--llm-backend mlx`) | `mlx-lm` + `outlines[mlxlm]` + `pydantic` | grammar-constrained 出力 |
 | LLM 校正 (`--llm-backend openai`) | (標準 `urllib` のみ) | vllm-mlx / Ollama 等の OpenAI 互換 HTTP |
 | 音声処理 | `ffmpeg` (システムバイナリ) | `brew install ffmpeg` |
@@ -87,6 +88,19 @@ faster-whisper か mlx-whisper が HuggingFace から `~/.cache/huggingface/` �
 | `medium` | ~1.5 GB | ~3 GB |
 | `turbo` (既定) | ~1.5 GB | ~3 GB |
 | `large-v3` | ~3 GB | ~6 GB |
+
+### VibeVoice-ASR (`--asr-backend vibevoice`)
+
+Whisper の代わりに Microsoft の [VibeVoice-ASR](https://github.com/microsoft/VibeVoice) を使う実験的 backend。60 分までの音声を 1-pass で転写する長時間 ASR で、hint (initial_prompt) は hotwords 相当の context prompt として渡される。60 分を超える会議は 50 分単位の chunk に自動分割する。
+
+```bash
+uv sync --extra shugiin-asr-vibevoice
+kkcap shugiin 56246 --asr-backend vibevoice
+```
+
+- モデルは `microsoft/VibeVoice-ASR-HF` (約 18 GB DL、bf16)。`--model` で別の HF model id も指定可
+- 要 `transformers>=5.3`。CUDA GPU (VRAM 20 GB 程度) を推奨。CPU でも動くが非常に遅い
+- 音声は内部で 24kHz mono に変換される (`<base>_24k.wav` としてキャッシュ)
 
 ### LLM モデル (`--llm-correct` / `--llm-context`)
 
@@ -333,8 +347,8 @@ kokkai/
 | `-o, --output` | 出力ディレクトリ |
 | `--no-open` | 生成後にブラウザを開かない |
 | `--asr` / `--no-asr` | ASR で字幕付き HTML を生成 (既定で有効、要 `shugiin-asr` extras)。`--no-asr` で Phase 2 タイムラインのみ |
-| `--asr-backend` | `faster` / `mlx`。省略時は Apple Silicon + `mlx_whisper` 利用可なら `mlx`、それ以外は `faster` を自動選択 |
-| `--model` | Whisper モデル: `turbo` (既定) / `large-v3` / `medium` / `small` / `base` / `tiny` |
+| `--asr-backend` | `faster` / `mlx` / `vibevoice`。省略時は Apple Silicon + `mlx_whisper` 利用可なら `mlx`、それ以外は `faster` を自動選択。`vibevoice` は要 `shugiin-asr-vibevoice` extras + CUDA GPU 推奨 |
+| `--model` | ASR モデル: `turbo` (既定) / `large-v3` / `medium` / `small` / `base` / `tiny`、または HF model id (`vibevoice` の既定は `microsoft/VibeVoice-ASR-HF`) |
 | `--no-hint` | ヒント文 (initial_prompt) 注入を切る |
 | `--refresh-members` | 議員名簿キャッシュを強制更新 |
 | `--redownload` | wav キャッシュを無視して HLS から再変換 |

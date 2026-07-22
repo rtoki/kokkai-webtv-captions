@@ -12,15 +12,18 @@ from kokkai.shugiin.asr import (
     ASR_BACKENDS,
     DEFAULT_ASR_BACKEND,
     DEFAULT_MLX_MODEL,
+    DEFAULT_VIBEVOICE_MODEL,
+    _vibevoice_segments_to_cues,
     assign_cues_to_speakers,
 )
 
 
 def test_backend_constants_are_stable():
     """ASR backend 名は CLI / docs に出ているので固定する。"""
-    assert ASR_BACKENDS == ("faster", "mlx")
+    assert ASR_BACKENDS == ("faster", "mlx", "vibevoice")
     assert DEFAULT_ASR_BACKEND == "faster"
     assert DEFAULT_MLX_MODEL.startswith("mlx-community/whisper-")
+    assert DEFAULT_VIBEVOICE_MODEL == "microsoft/VibeVoice-ASR-HF"
 
 
 def test_unknown_backend_raises_asr_error():
@@ -54,6 +57,43 @@ def test_recommended_asr_backend_falls_back_to_faster(monkeypatch):
     monkeypatch.setattr(asr, "_is_apple_silicon", lambda: True)
     monkeypatch.setattr(asr, "_mlx_whisper_available", lambda: False)
     assert asr.recommended_asr_backend() == "faster"
+
+
+def test_vibevoice_segments_to_cues_maps_fields():
+    """VibeVoice の parsed segment (Start/End/Speaker/Content) → cue 変換。"""
+    segments = [
+        {"Start": 1.5, "End": 3.0, "Speaker": "speaker_001", "Content": " おはようございます "},
+        {"Start": 3.5, "End": 6.0, "Speaker": "speaker_002", "Content": "審議を始めます"},
+    ]
+    cues = _vibevoice_segments_to_cues(segments)
+    assert cues == [
+        {"start": 1.5, "end": 3.0, "text": "おはようございます"},
+        {"start": 3.5, "end": 6.0, "text": "審議を始めます"},
+    ]
+
+
+def test_vibevoice_segments_to_cues_offset_and_sort():
+    """chunk 分割時の累積 offset 加算と start 昇順ソート。"""
+    segments = [
+        {"Start": 10.0, "End": 12.0, "Content": "後"},
+        {"Start": 2.0, "End": 4.0, "Content": "前"},
+    ]
+    cues = _vibevoice_segments_to_cues(segments, offset=3000.0)
+    assert [c["text"] for c in cues] == ["前", "後"]
+    assert cues[0]["start"] == 3002.0
+    assert cues[1]["end"] == 3012.0
+
+
+def test_vibevoice_segments_to_cues_skips_broken_segments():
+    """空 Content / dict でない要素 / 数値化できない Start は捨てる。End 欠落は Start で補う。"""
+    segments = [
+        {"Start": 0.0, "End": 1.0, "Content": "   "},
+        "not-a-dict",
+        {"Start": "x", "End": 1.0, "Content": "壊れた start"},
+        {"Start": 5.0, "Content": "end なし"},
+    ]
+    cues = _vibevoice_segments_to_cues(segments)
+    assert cues == [{"start": 5.0, "end": 5.0, "text": "end なし"}]
 
 
 SPEAKERS = [
