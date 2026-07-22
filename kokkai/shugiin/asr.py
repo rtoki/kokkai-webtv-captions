@@ -359,12 +359,15 @@ def _transcribe_vibevoice(
         output_ids = model.generate(**inputs, max_new_tokens=32768, do_sample=False)
         generated_ids = output_ids[:, inputs["input_ids"].shape[1]:]
         decoded = processor.decode(generated_ids, return_format="parsed")
-        # decode は batch ごとの list を返す (batch=1 なので先頭)。古い/将来の
-        # transformers で segment list が直接返るケースも許容する。
+        # decode は batch ごとの list を返す (batch=1 なので先頭)。単一入力で
+        # segment list が直接返るケースも許容する。parse に失敗すると
+        # 生成テキストがそのまま str で返る仕様なので、その場合は fail-fast。
         segments = decoded[0] if decoded and isinstance(decoded[0], list) else decoded
-        if not isinstance(segments, list):
+        if not isinstance(segments, list) or any(isinstance(s, str) for s in segments):
+            raw = segments if isinstance(segments, str) else str(segments)
             raise AsrError(
-                f"VibeVoice の parsed 出力を解釈できません: {type(segments).__name__}"
+                "VibeVoice の出力を parse できませんでした"
+                f" (chunk {i}/{len(chunks)}): {raw[:200]}"
             )
         cues.extend(_vibevoice_segments_to_cues(segments, offset=offset))
         offset += _wav_duration_sec(chunk)
