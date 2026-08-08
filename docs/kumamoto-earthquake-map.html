@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>令和8年熊本地震 特別マップ</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<style>
+  :root {
+    --ink: #1a1d21;
+    --ink-2: #4b5563;
+    --ink-3: #8b93a1;
+    --surface: #ffffff;
+    --surface-2: #f4f6f8;
+    --line: #e3e7ec;
+    --accent: #b91c1c;
+    /* 気象庁 震度配色(標準) */
+    --si7: #b40068; --si6u: #a50021; --si6l: #ff2800;
+    --si5u: #ff9900; --si5l: #ffe600; --si4: #fae696;
+    --shelter: #0f766e;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    font-family: "Hiragino Sans", "Noto Sans JP", "Yu Gothic UI", Meiryo, sans-serif;
+    color: var(--ink); background: var(--surface-2);
+    display: flex; flex-direction: column;
+  }
+
+  header {
+    background: #17202b; color: #fff;
+    padding: 10px 16px; display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 17px; font-weight: 700; letter-spacing: .02em; }
+  header .sub { font-size: 12px; color: #aeb8c4; }
+  header .badge {
+    font-size: 11px; font-weight: 700; color: #fff; background: var(--accent);
+    border-radius: 4px; padding: 2px 8px;
+  }
+
+  .wrap { flex: 1; display: flex; min-height: 0; }
+  aside {
+    width: 320px; flex: none; overflow-y: auto;
+    background: var(--surface); border-right: 1px solid var(--line);
+    padding: 14px 14px 24px;
+  }
+  #map { flex: 1; min-width: 0; background: #dfe6ec; }
+
+  section + section { margin-top: 18px; }
+  h2 {
+    font-size: 12px; font-weight: 700; color: var(--ink-3);
+    letter-spacing: .08em; margin-bottom: 8px;
+  }
+
+  /* 概況 stat tiles */
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .stat {
+    background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px;
+    padding: 8px 10px;
+  }
+  .stat .v { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .stat .k { font-size: 11px; color: var(--ink-2); margin-top: 2px; }
+  .stat .note { font-size: 10px; color: var(--ink-3); }
+
+  /* レイヤー */
+  .layers label {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 13px; padding: 5px 2px; cursor: pointer;
+  }
+  .layers input { accent-color: #17202b; width: 15px; height: 15px; }
+  .layers .hint { font-size: 11px; color: var(--ink-3); margin: 2px 0 0 25px; }
+
+  /* 地震リスト */
+  .quakes { list-style: none; }
+  .quakes li {
+    border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px;
+    margin-bottom: 6px; cursor: pointer; background: var(--surface);
+  }
+  .quakes li:hover { background: var(--surface-2); }
+  .quakes .t { font-size: 12px; color: var(--ink-2); }
+  .quakes .m { font-size: 13px; font-weight: 700; margin-top: 1px; }
+  .quakes .chip {
+    display: inline-block; font-size: 11px; font-weight: 700;
+    border-radius: 4px; padding: 1px 6px; margin-left: 6px; vertical-align: 1px;
+  }
+  .quakes .memo { font-size: 11px; color: var(--ink-3); margin-top: 8px; line-height: 1.5; }
+
+  /* 震度凡例 */
+  .legend { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .legend .cell {
+    display: flex; align-items: center; gap: 6px; font-size: 12px;
+  }
+  .legend .sw {
+    width: 18px; height: 18px; border-radius: 4px; flex: none;
+    border: 1px solid rgba(0,0,0,.15);
+  }
+  .misc { font-size: 12px; }
+  .misc .row { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
+  .misc .dot { width: 12px; height: 12px; border-radius: 50%; flex: none; }
+  .misc .lineSw { width: 22px; height: 0; border-top: 3px dashed #7c2d12; flex: none; }
+
+  .src { font-size: 11px; color: var(--ink-2); line-height: 1.7; }
+  .src a { color: #1d4ed8; }
+  .caution {
+    font-size: 11px; color: var(--ink-2); line-height: 1.6;
+    background: #fff8e6; border: 1px solid #f2e2ae; border-radius: 8px; padding: 8px 10px;
+  }
+
+  /* マーカー */
+  .epi-icon { filter: drop-shadow(0 1px 2px rgba(0,0,0,.4)); }
+  .muni-label {
+    background: transparent; border: none; box-shadow: none;
+    font-size: 10px; font-weight: 700; color: #263241;
+    text-shadow: 0 0 3px #fff, 0 0 3px #fff, 0 0 3px #fff;
+    white-space: nowrap;
+  }
+  .leaflet-popup-content { font-size: 12px; line-height: 1.6; }
+  .leaflet-popup-content b { font-size: 13px; }
+
+  .mapnote {
+    position: absolute; z-index: 800; right: 10px; top: 10px;
+    background: rgba(23,32,43,.88); color: #fff; font-size: 11px;
+    border-radius: 6px; padding: 5px 10px; pointer-events: none;
+    display: none;
+  }
+
+  @media (max-width: 760px) {
+    .wrap { flex-direction: column-reverse; }
+    aside { width: 100%; max-height: 45%; border-right: none; border-top: 1px solid var(--line); }
+    #map { min-height: 55%; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>令和8年熊本地震 特別マップ</h1>
+  <span class="badge">最大震度7</span>
+  <span class="sub">2026年7月28日 16:27発生 / M7.1 / 深さ約16km(熊本県熊本地方・日奈久断層帯周辺)</span>
+</header>
+
+<div class="wrap">
+  <aside>
+    <section>
+      <h2>概況(8月2日時点・速報値)</h2>
+      <div class="stats">
+        <div class="stat"><div class="v">M7.1</div><div class="k">本震の規模</div></div>
+        <div class="stat"><div class="v">震度7</div><div class="k">宇城市・氷川町</div></div>
+        <div class="stat"><div class="v">38人</div><div class="k">死者</div></div>
+        <div class="stat"><div class="v">9,226人</div><div class="k">避難者</div></div>
+        <div class="stat"><div class="v">3,851棟</div><div class="k">住家被害<span class="note">(全壊181)</span></div></div>
+        <div class="stat"><div class="v">4.68万戸</div><div class="k">断水</div></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>レイヤー</h2>
+      <div class="layers">
+        <label><input type="checkbox" id="lyEpi" checked> 震央(本震・主な余震)</label>
+        <label><input type="checkbox" id="lyShindo" checked> 市町村の最大震度(震度5強以上)</label>
+        <label><input type="checkbox" id="lyShelter" checked> 指定緊急避難場所(地震)</label>
+        <div class="hint" id="shelterHint">※ 地図をズーム(市街地レベル)すると表示されます</div>
+        <label><input type="checkbox" id="lyFault"> 断層帯(概略位置)</label>
+      </div>
+    </section>
+
+    <section>
+      <h2>主な地震(クリックで移動)</h2>
+      <ul class="quakes" id="quakeList"></ul>
+      <div class="memo quakes">
+        このほか 7/28〜29 に震度5弱の余震3回、8/1 に震度5弱1回。
+        7/29 13時までに震度1以上の地震は186回発生。地震活動は依然活発で、
+        当分の間、最大震度7程度の地震に注意が必要とされています。
+      </div>
+    </section>
+
+    <section>
+      <h2>震度凡例(気象庁配色)</h2>
+      <div class="legend">
+        <div class="cell"><span class="sw" style="background:var(--si7)"></span>7</div>
+        <div class="cell"><span class="sw" style="background:var(--si6u)"></span>6強</div>
+        <div class="cell"><span class="sw" style="background:var(--si6l)"></span>6弱</div>
+        <div class="cell"><span class="sw" style="background:var(--si5u)"></span>5強</div>
+        <div class="cell"><span class="sw" style="background:var(--si5l)"></span>5弱</div>
+        <div class="cell"><span class="sw" style="background:var(--si4)"></span>4</div>
+      </div>
+      <div class="misc" style="margin-top:8px">
+        <div class="row"><span class="dot" style="background:#d40000;border:2px solid #fff;outline:1px solid #d40000"></span>震央(★=本震)</div>
+        <div class="row"><span class="dot" style="background:var(--shelter)"></span>指定緊急避難場所(地震に対応)</div>
+        <div class="row"><span class="lineSw"></span>断層帯(概略)</div>
+      </div>
+    </section>
+
+    <section>
+      <h2>出典</h2>
+      <div class="src">
+        <a href="https://www.jma.go.jp/jma/menu/20260728_kumamoto_jishin.html" target="_blank" rel="noopener">気象庁 令和8年熊本地震ポータル</a><br>
+        <a href="https://www.pref.kumamoto.jp/soshiki/1/274517.html" target="_blank" rel="noopener">熊本県 令和8年熊本地震に関する情報</a><br>
+        <a href="https://www.mlit.go.jp/saigai/saigai_260728.html" target="_blank" rel="noopener">国土交通省 被害と対応</a><br>
+        避難場所データ・地図タイル: <a href="https://www.gsi.go.jp/" target="_blank" rel="noopener">国土地理院</a>
+      </div>
+    </section>
+
+    <section>
+      <div class="caution">
+        震央・市町村マーカーの位置や被害数値は報道・速報資料に基づく概略値です。
+        避難場所は国土地理院「指定緊急避難場所(災害種別: 地震)」のデータを表示しており、
+        地震後の開設状況・使用可否とは異なる場合があります(例: 宇城市の豊野防災拠点センターは
+        被災により使用不可)。実際の避難は各市町村の最新発表に従ってください。
+      </div>
+    </section>
+  </aside>
+
+  <div id="map">
+    <div class="mapnote" id="mapNote">避難場所はズームすると表示されます</div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script>
+"use strict";
+
+/* ---------- 地図(熊本県に限定) ---------- */
+const KUMAMOTO_BOUNDS = L.latLngBounds([31.75, 129.55], [33.35, 131.45]);
+const map = L.map("map", {
+  center: [32.62, 130.72],
+  zoom: 10,
+  minZoom: 9,
+  maxZoom: 17,
+  maxBounds: KUMAMOTO_BOUNDS.pad(0.05),
+  maxBoundsViscosity: 0.8,
+});
+L.tileLayer("https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png", {
+  attribution: '<a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank">国土地理院</a>',
+  maxZoom: 17,
+}).addTo(map);
+
+const SI_COLOR = {
+  "7":  { bg: "#b40068", fg: "#fff" },
+  "6強": { bg: "#a50021", fg: "#fff" },
+  "6弱": { bg: "#ff2800", fg: "#fff" },
+  "5強": { bg: "#ff9900", fg: "#1a1d21" },
+  "5弱": { bg: "#ffe600", fg: "#1a1d21" },
+};
+
+/* ---------- 震央(本震・主な余震) ---------- */
+const QUAKES = [
+  {
+    id: "main",
+    time: "7/28 16:27", name: "本震(熊本県熊本地方)",
+    lat: 32.60, lon: 130.70, mag: "M7.1", depth: "約16km", si: "7",
+    note: "宇城市・氷川町で震度7。長周期地震動階級4(宇城市・八代市)。有明海・八代海に津波注意報。",
+  },
+  {
+    id: "a0729",
+    time: "7/29 22:19", name: "余震(天草・芦北地方)",
+    lat: 32.40, lon: 130.45, mag: "M5.8", depth: "—", si: "5弱",
+    note: "震央位置は概略。",
+  },
+];
+
+const epiLayer = L.layerGroup();
+QUAKES.forEach((q) => {
+  const isMain = q.id === "main";
+  const size = isMain ? 34 : 20;
+  const icon = L.divIcon({
+    className: "epi-icon",
+    iconSize: [size, size],
+    iconAnchor: [size / 2, size / 2],
+    html: isMain
+      ? `<svg width="${size}" height="${size}" viewBox="0 0 34 34">
+           <path d="M17 1 L21 12 L33 12 L23.5 19 L27 31 L17 24 L7 31 L10.5 19 L1 12 L13 12 Z"
+                 fill="#d40000" stroke="#fff" stroke-width="2"/>
+         </svg>`
+      : `<svg width="${size}" height="${size}" viewBox="0 0 20 20">
+           <circle cx="10" cy="10" r="8" fill="#d40000" stroke="#fff" stroke-width="2.5"/>
+         </svg>`,
+  });
+  q.marker = L.marker([q.lat, q.lon], { icon, zIndexOffset: isMain ? 1000 : 500 })
+    .bindPopup(
+      `<b>${q.name}</b><br>${q.time} / ${q.mag} / 深さ${q.depth}<br>最大震度 ${q.si}<br><span style="color:#666">${q.note}</span>`
+    );
+  epiLayer.addLayer(q.marker);
+});
+epiLayer.addTo(map);
+
+/* サイドバーの地震リスト */
+const listEl = document.getElementById("quakeList");
+QUAKES.forEach((q) => {
+  const li = document.createElement("li");
+  const c = SI_COLOR[q.si];
+  li.innerHTML = `<div class="t">${q.time}</div>
+    <div class="m">${q.name} ${q.mag}
+      <span class="chip" style="background:${c.bg};color:${c.fg}">震度${q.si}</span></div>`;
+  li.addEventListener("click", () => {
+    map.setView([q.lat, q.lon], 11);
+    q.marker.openPopup();
+  });
+  listEl.appendChild(li);
+});
+
+/* ---------- 市町村の最大震度(震度5強以上・役場位置に概略表示) ---------- */
+const MUNI = [
+  ["宇城市",   32.647, 130.684, "7"],
+  ["氷川町",   32.583, 130.672, "7"],
+  ["熊本市",   32.803, 130.708, "6強"],
+  ["八代市",   32.506, 130.602, "6強"],
+  ["宇土市",   32.687, 130.658, "6強"],
+  ["美里町",   32.638, 130.786, "6強"],
+  ["益城町",   32.793, 130.820, "6強"],
+  ["上天草市", 32.584, 130.438, "6弱"],
+  ["合志市",   32.886, 130.790, "6弱"],
+  ["大津町",   32.878, 130.870, "6弱"],
+  ["西原村",   32.844, 130.895, "6弱"],
+  ["御船町",   32.712, 130.802, "6弱"],
+  ["芦北町",   32.299, 130.494, "6弱"],
+  ["水俣市",   32.211, 130.401, "5強"],
+  ["山鹿市",   33.017, 130.691, "5強"],
+  ["菊池市",   32.979, 130.813, "5強"],
+  ["天草市",   32.459, 130.193, "5強"],
+  ["菊陽町",   32.863, 130.828, "5強"],
+  ["津奈木町", 32.234, 130.439, "5強"],
+];
+
+const shindoLayer = L.layerGroup();
+MUNI.forEach(([name, lat, lon, si]) => {
+  const c = SI_COLOR[si];
+  const r = si === "7" ? 13 : si.startsWith("6") ? 11 : 9;
+  L.circleMarker([lat, lon], {
+    radius: r, color: "#fff", weight: 2, fillColor: c.bg, fillOpacity: 0.95,
+  })
+    .bindPopup(`<b>${name}</b><br>最大震度 <b>${si}</b><br><span style="color:#666">位置は役場の概略位置</span>`)
+    .addTo(shindoLayer);
+  L.marker([lat, lon], {
+    icon: L.divIcon({ className: "muni-label", html: name, iconAnchor: [-(r + 2), 7] }),
+    interactive: false,
+  }).addTo(shindoLayer);
+});
+shindoLayer.addTo(map);
+
+/* ---------- 指定緊急避難場所(地震) 国土地理院 GeoJSONタイル(z=10) ---------- */
+const SHELTER_MIN_ZOOM = 12;
+const shelterLayer = L.layerGroup();
+shelterLayer.addTo(map);
+const shelterCache = new Map(); // "x/y" -> L.LayerGroup | "loading"
+const mapNote = document.getElementById("mapNote");
+
+function tileXY(lat, lon, z) {
+  const n = 2 ** z;
+  const x = Math.floor(((lon + 180) / 360) * n);
+  const latR = (lat * Math.PI) / 180;
+  const y = Math.floor(
+    ((1 - Math.log(Math.tan(latR) + 1 / Math.cos(latR)) / Math.PI) / 2) * n
+  );
+  return [x, y];
+}
+
+function shelterPopup(props) {
+  const name = props.name || props["名称"] || "指定緊急避難場所";
+  const addr = props.address || props["住所"] || "";
+  const remarks = props.remarks || props["備考"] || "";
+  return `<b>${name}</b><br>${addr}${remarks ? "<br><span style='color:#666'>" + remarks + "</span>" : ""}
+    <br><span style="color:#0f766e;font-weight:700">災害種別: 地震に対応</span>`;
+}
+
+function loadShelters() {
+  if (!document.getElementById("lyShelter").checked) return;
+  if (map.getZoom() < SHELTER_MIN_ZOOM) {
+    mapNote.style.display = "block";
+    return;
+  }
+  mapNote.style.display = "none";
+
+  const b = map.getBounds();
+  const z = 10; // GSIの避難場所GeoJSONタイルはz=10固定
+  const [x0, y0] = tileXY(b.getNorth(), b.getWest(), z);
+  const [x1, y1] = tileXY(b.getSouth(), b.getEast(), z);
+  for (let x = x0; x <= x1; x++) {
+    for (let y = y0; y <= y1; y++) {
+      const key = `${x}/${y}`;
+      if (shelterCache.has(key)) {
+        const g = shelterCache.get(key);
+        if (g !== "loading" && !shelterLayer.hasLayer(g)) shelterLayer.addLayer(g);
+        continue;
+      }
+      shelterCache.set(key, "loading");
+      // skhb04 = 指定緊急避難場所(災害種別: 地震)
+      fetch(`https://cyberjapandata.gsi.go.jp/xyz/skhb04/${z}/${x}/${y}.geojson`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((gj) => {
+          const g = L.layerGroup();
+          if (gj && gj.features) {
+            gj.features.forEach((f) => {
+              const [lon, lat] = f.geometry.coordinates;
+              if (!KUMAMOTO_BOUNDS.contains([lat, lon])) return;
+              L.circleMarker([lat, lon], {
+                radius: 5, color: "#fff", weight: 1.5,
+                fillColor: "#0f766e", fillOpacity: 0.9,
+              })
+                .bindPopup(shelterPopup(f.properties || {}))
+                .addTo(g);
+            });
+          }
+          shelterCache.set(key, g);
+          if (document.getElementById("lyShelter").checked && map.getZoom() >= SHELTER_MIN_ZOOM)
+            shelterLayer.addLayer(g);
+        })
+        .catch(() => shelterCache.delete(key));
+    }
+  }
+}
+
+function refreshShelterVisibility() {
+  const on = document.getElementById("lyShelter").checked;
+  if (!on || map.getZoom() < SHELTER_MIN_ZOOM) {
+    shelterLayer.clearLayers();
+    mapNote.style.display = on ? "block" : "none";
+    if (on) loadShelters();
+    return;
+  }
+  loadShelters();
+}
+map.on("moveend zoomend", refreshShelterVisibility);
+refreshShelterVisibility();
+
+/* ---------- 断層帯(概略位置) ---------- */
+const faultLayer = L.layerGroup();
+const FAULTS = [
+  {
+    name: "日奈久断層帯(概略)",
+    pts: [[32.80, 130.82], [32.70, 130.76], [32.60, 130.70], [32.50, 130.62], [32.40, 130.54], [32.30, 130.45]],
+  },
+  {
+    name: "布田川断層帯(概略)",
+    pts: [[32.88, 131.01], [32.83, 130.90], [32.80, 130.82]],
+  },
+];
+FAULTS.forEach((f) => {
+  L.polyline(f.pts, { color: "#7c2d12", weight: 3, dashArray: "8 6", opacity: 0.85 })
+    .bindPopup(`<b>${f.name}</b><br><span style="color:#666">走向は模式的な概略表示です</span>`)
+    .addTo(faultLayer);
+});
+
+/* ---------- レイヤー切替 ---------- */
+function bindToggle(id, layer, onChange) {
+  document.getElementById(id).addEventListener("change", (e) => {
+    if (onChange) return onChange(e.target.checked);
+    e.target.checked ? map.addLayer(layer) : map.removeLayer(layer);
+  });
+}
+bindToggle("lyEpi", epiLayer);
+bindToggle("lyShindo", shindoLayer);
+bindToggle("lyFault", faultLayer);
+document.getElementById("lyShelter").addEventListener("change", refreshShelterVisibility);
+</script>
+</body>
+</html>
