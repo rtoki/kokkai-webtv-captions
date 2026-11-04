@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd 用テンプレート。__PROJECT_DIR__ をリポジトリの絶対パスに置換して導入する
+  (リポジトリ直下で実行):
+
+    sed "s#__PROJECT_DIR__#$PWD#g" scripts/kkcap-publish.plist.template \
+      > ~/Library/LaunchAgents/com.kkcap.publish-daily.plist
+    launchctl load -w ~/Library/LaunchAgents/com.kkcap.publish-daily.plist
+
+  停止 / 削除:
+
+    launchctl unload -w ~/Library/LaunchAgents/com.kkcap.publish-daily.plist
+
+  手動で 1 回走らせて疎通確認:
+
+    launchctl start com.kkcap.publish-daily
+    tail -f logs/publish_daily.out.log
+
+  時刻変更したら unload → 編集 → load し直し。
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.kkcap.publish-daily</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <string>./scripts/publish_daily.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__PROJECT_DIR__</string>
+
+    <!-- launchd は最小 PATH なので homebrew + node を明示 -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>LANG</key>
+        <string>ja_JP.UTF-8</string>
+    </dict>
+
+    <!-- 毎日 23:30 JST に起動 (Diet 中継は通常夕方までに終わる) -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>23</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+
+    <!-- 起動時に過去の予定時刻を取りこぼしてた場合に補填 -->
+    <key>StartOnMount</key>
+    <false/>
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>__PROJECT_DIR__/logs/publish_daily.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__PROJECT_DIR__/logs/publish_daily.err.log</string>
+
+    <!-- スリープ抑止は外側で。例: pmset -a sleep 0 / caffeinate -dims -->
+</dict>
+</plist>

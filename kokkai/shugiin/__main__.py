@@ -216,12 +216,33 @@ def _run_phase3(args: argparse.Namespace) -> tuple[Path, dict, dict]:
                 f"{base_prompt[:80]}{'...' if len(base_prompt) > 80 else ''}"
             )
 
+        # 冒頭/末尾の無音をスキップ (--asr-trim-edges)。Whisper の処理対象を
+        # 発話区間だけに絞ることで 'ご視聴ありがとうございました' 系 hallucination
+        # の発生機会と ASR 処理時間の両方を削減する。
+        # getattr で防御的に取る (テストで Namespace を手組みするケースに対応)。
+        clip_start = 0.0
+        clip_end: float | None = None
+        if getattr(args, "asr_trim_edges", False):
+            from .audio import detect_edge_silence
+            clip_start, clip_end = detect_edge_silence(wav_path)
+            trim_head = clip_start
+            # last_speech が wav 末尾近くならスキップ表示は不要
+            info(
+                f"[audio] 無音 trim: 冒頭 {trim_head:.0f}s スキップ"
+                f", 末尾 {clip_end:.0f}s で打ち切り"
+                if clip_start > 0 or clip_end is not None
+                else "[audio] 無音 trim: 発話を検出できず、wav 全体を処理"
+            )
+            stats["trim_clip_start"] = clip_start
+            stats["trim_clip_end"] = clip_end
+
         # ASR (optionally 2-pass with --llm-context)
         if args.llm_context:
             step(4, 5, f"ASR pass1 (固有名詞抽出用): {args.asr_backend}/{args.model}")
             pass1 = transcribe(
                 wav_path, initial_prompt=base_prompt,
                 backend=args.asr_backend, model_size=args.model,
+                clip_start=clip_start, clip_end=clip_end,
             )
             joined = " ".join(c["text"] for c in pass1)
             terms = extract_glossary_terms(
@@ -237,12 +258,14 @@ def _run_phase3(args: argparse.Namespace) -> tuple[Path, dict, dict]:
             cues = transcribe(
                 wav_path, initial_prompt=augmented,
                 backend=args.asr_backend, model_size=args.model,
+                clip_start=clip_start, clip_end=clip_end,
             )
         else:
             step(4, 5, f"ASR 実行中: {args.asr_backend}/{args.model}")
             cues = transcribe(
                 wav_path, initial_prompt=base_prompt,
                 backend=args.asr_backend, model_size=args.model,
+                clip_start=clip_start, clip_end=clip_end,
             )
 
         # raw ASR cues を JSON で保存 → 次回 --skip-asr で再利用可能
@@ -280,8 +303,36 @@ def _run_phase3(args: argparse.Namespace) -> tuple[Path, dict, dict]:
         info(f"[preclean] degenerate loop {n_loops} 件を [音声不明瞭] に置換")
     stats["preclean_loops"] = n_loops
 
+    # 公式 meta の speakers は質問者の議員のみ。委員長セクション内の cue から
+    # 大臣 / 政府参考人 / 提出者 等の答弁者を SudachiPy で検出して speakers に
+    # 新 turn として挿入する (参議院側 sangiin.detect の役職判定を再利用)。
+    from .answerer import inject_answerer_turns, normalize_answerer_names
+    augmented_speakers = inject_answerer_turns(meta["speakers"], cues)
+    n_injected = len(augmented_speakers) - len(meta["speakers"])
+    if n_injected:
+        info(f"[answerer] 答弁者を検出: {n_injected} turn 追加 (大臣/政府参考人/提出者 等)")
+    stats["answerer_turns_injected"] = n_injected
+
+    # 検出した答弁者は ASR で姓しか取れないことが多い (「山田 副大臣」「伊藤 大臣」)。
+    # 衆議院議員名簿で姓ユニーク一致するならフルネームに正規化する。
+    # --skip-asr パスでは members を取っていないので、ここで遅延取得する。
+    members_for_norm: list[dict]
+    try:
+        members_for_norm = load_members(
+            refresh=getattr(args, "refresh_members", False),
+        )
+    except Exception as e:
+        info(f"[answerer] load_members 失敗 ({e})、姓の正規化はスキップ")
+        members_for_norm = []
+    augmented_speakers, n_norm = normalize_answerer_names(
+        augmented_speakers, members_for_norm,
+    )
+    if n_norm:
+        info(f"[answerer] 議員名簿で正規化: {n_norm} entry (姓のみ → フルネーム)")
+    stats["answerer_names_normalized"] = n_norm
+
     # cue → 発言者振り分け → 各発言者内で文単位マージ
-    groups = assign_cues_to_speakers(cues, meta["speakers"])
+    groups = assign_cues_to_speakers(cues, augmented_speakers)
     total_after = 0
     for g in groups:
         g["cues"] = merge_cues_into_sentences(g["cues"])
@@ -391,9 +442,10 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="ASR を実行して字幕付き HTML を生成 (既定で有効、要 [shugiin-asr] + ffmpeg)")
     g_asr.add_argument("--no-asr", dest="asr", action="store_false",
                        help="ASR を実行せず Phase 2 のタイムラインのみ生成")
-    g_asr.add_argument("--asr-backend", choices=["faster", "mlx"], default=None,
+    g_asr.add_argument("--asr-backend", choices=["faster", "mlx", "vibevoice"], default=None,
                        help=("ASR backend (省略時は Apple Silicon + mlx_whisper 利用可なら "
-                             "mlx、それ以外は faster を自動選択)"))
+                             "mlx、それ以外は faster を自動選択)。vibevoice は "
+                             "VibeVoice-ASR 4bit (mlx-audio、Apple Silicon 専用、~6GB)"))
     g_asr.add_argument("--model", default="turbo",
                        help=("Whisper モデル (faster: turbo/large-v3/medium/small/base/tiny..., "
                              "mlx: HF model id)。tiny/base は CPU 機・低スペック向け"))
@@ -404,6 +456,12 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="initial_prompt 注入を無効化 (精度比較・デバッグ用)")
     g_asr.add_argument("--refresh-members", action="store_true",
                        help="衆議院議員名簿キャッシュを無視して再取得")
+    g_asr.add_argument("--asr-trim-edges", action="store_true",
+                       help=("ffmpeg silencedetect で wav 冒頭/末尾の長い無音区間を"
+                             " 検出し、Whisper の処理対象から外す。衆議院 webtv は"
+                             " 開議の十数分前から HLS が流れるため、冒頭の無音区間で"
+                             " Whisper が 'ご視聴ありがとうございました' 系 hallucination"
+                             " を吐く。ASR 処理時間 15-25%% 短縮、hallucination も削減。"))
 
     g_corr = parser.add_argument_group("校正 (--asr 時のみ)")
     g_corr.add_argument("--no-glossary", action="store_true",

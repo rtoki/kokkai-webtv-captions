@@ -12,6 +12,7 @@ faster-whisper は内部で同じことを ffmpeg で行うが、一度ローカ
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import sys
@@ -89,3 +90,85 @@ def hls_to_wav(
     size_mb = out_path.stat().st_size / 1024 / 1024
     print(f"[audio] 完了: {out_path.name} ({size_mb:.1f} MB)", file=sys.stderr)
     return out_path
+
+
+# ffmpeg silencedetect の出力パース用 (stderr に書かれる):
+#   [silencedetect @ 0x...] silence_start: 0
+#   [silencedetect @ 0x...] silence_end: 1200.5 | silence_duration: 1200.5
+_SILENCE_START_RE = re.compile(r"silence_start:\s*(-?[\d.]+)")
+_SILENCE_END_RE = re.compile(r"silence_end:\s*(-?[\d.]+)")
+_DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d+):([\d.]+)")
+
+
+def detect_edge_silence(
+    wav_path: Path,
+    *,
+    threshold_db: float = -45.0,
+    min_silence_sec: float = 2.0,
+) -> tuple[float, float]:
+    """wav の冒頭/末尾の長い無音区間を検出し、(first_speech_sec, last_speech_sec) を返す。
+
+    衆議院 webtv は開議の十数分〜数十分前から HLS が流れるため、wav の冒頭が長い
+    無音区間になることが多い。Whisper は無音区間に対して「ご視聴ありがとうございました」
+    系の YouTube 系幻覚を高頻度で吐く (``llm_correct.drop_hallucinations`` で除去
+    されるが、ASR の処理時間自体は消費される)。
+
+    本関数は ffmpeg の ``silencedetect`` フィルタで無音を検出するだけで、wav 自体は
+    改変しない。返り値の (start, end) を ``--clip-timestamps`` 系で Whisper に
+    渡すことで、ASR の処理対象を発話区間だけに絞る。
+
+    Args:
+        wav_path: 検査対象の 16kHz mono PCM wav。
+        threshold_db: 無音判定の音量閾値 (dBFS)。-45 dB は会議音声の暗騒音に
+            十分まで余裕がある (議場マイクは無発話時でも -55 〜 -50 dB 程度)。
+        min_silence_sec: この長さ以上の無音だけを検出対象とする (短い言間は無視)。
+
+    Returns:
+        ``(first_speech_sec, last_speech_sec)``。
+
+        - 発話を検出できない場合: ``(0.0, duration)`` (=trim 無し相当)
+        - 冒頭に長い無音が無い場合: ``first_speech_sec = 0.0``
+        - 末尾に長い無音が無い場合: ``last_speech_sec = duration``
+    """
+    ensure_ffmpeg()
+
+    cmd = [
+        "ffmpeg",
+        "-nostdin",
+        "-i", str(wav_path),
+        "-af", f"silencedetect=noise={threshold_db}dB:duration={min_silence_sec}",
+        "-f", "null", "-",
+    ]
+    # silencedetect の出力は stderr に出る。-loglevel info 以上が必要 (既定で OK)
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    stderr = proc.stderr
+
+    # 全体 duration を取得 (HH:MM:SS.ms)
+    duration = 0.0
+    m = _DURATION_RE.search(stderr)
+    if m:
+        duration = (
+            int(m.group(1)) * 3600
+            + int(m.group(2)) * 60
+            + float(m.group(3))
+        )
+
+    starts = [float(x) for x in _SILENCE_START_RE.findall(stderr)]
+    ends = [float(x) for x in _SILENCE_END_RE.findall(stderr)]
+
+    # 冒頭の無音: silence_start が 0 付近 (0 以下も含む) で開始する pair の
+    # silence_end[0] が最初の発話開始。閾値 0.1s 未満なら「冒頭無音」と判定。
+    first_speech = 0.0
+    if starts and ends and starts[0] < 0.1:
+        first_speech = ends[0]
+
+    # 末尾の無音: silence_start が duration 近くで silence_end が無いケース
+    # (ffmpeg は末尾無音の silence_end を出さない)。starts > ends ならそれ。
+    last_speech = duration
+    if duration > 0 and len(starts) > len(ends):
+        last_speech = starts[-1]
+
+    # 異常入力時の安全側フォールバック (発話区間が逆転している等)
+    if last_speech <= first_speech:
+        return (0.0, duration)
+    return (first_speech, last_speech)

@@ -160,7 +160,10 @@ def _enumerate_by_date(args: argparse.Namespace) -> list[tuple[str, str, str]]:
 
 def main(argv: list[str] | None = None) -> None:
     parser = _build_parser()
-    args = parser.parse_args(argv)
+    # 未知の引数 (--asr-backend / --llm-correct 等) は衆議院側にそのまま渡す。
+    # 値を取るものは `--asr-backend=vibevoice` の = 形式で書くこと
+    # (空白区切りだと値が positional の target に吸われる)。
+    args, shugiin_extra = parser.parse_known_args(argv)
 
     if not args.target and args.date_from is None and args.date_to is None and not args.refresh_pending:
         parser.error("target / --from/--to / --refresh-pending のいずれかは指定してください")
@@ -265,6 +268,7 @@ def main(argv: list[str] | None = None) -> None:
             argv_shugiin.append("--no-asr")
         if args.skip_asr:
             argv_shugiin.append("--skip-asr")
+        argv_shugiin += shugiin_extra
         saved = sys.argv
         sys.argv = ["shugiin"] + argv_shugiin
         try:
