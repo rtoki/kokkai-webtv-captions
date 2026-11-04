@@ -23,11 +23,12 @@ import sys
 from pathlib import Path
 
 
-ASR_BACKENDS = ("faster", "mlx")
+ASR_BACKENDS = ("faster", "mlx", "vibevoice")
 # ライブラリ層の portable default。CLI 既定は recommended_asr_backend() で
 # Apple Silicon なら "mlx" に切り替わる。
 DEFAULT_ASR_BACKEND = "faster"
 DEFAULT_MLX_MODEL = "mlx-community/whisper-large-v3-turbo"
+DEFAULT_VIBEVOICE_MODEL = "mlx-community/VibeVoice-ASR-4bit"
 
 # faster-whisper の model_size → HF repo_id (cache 存在確認に使う)。
 # faster_whisper.utils._MODELS と同じ内容のフリーズコピー (private API への依存を
@@ -51,6 +52,7 @@ _FASTER_MODEL_REPOS = {
 
 # 既知モデルの目安サイズ (Y/N プロンプトで表示)。
 _KNOWN_MODEL_SIZES = {
+    "mlx-community/VibeVoice-ASR-4bit": "5.7 GB",
     "mlx-community/whisper-large-v3-turbo": "1.5 GB",
     "mobiuslabsgmbh/faster-whisper-large-v3-turbo": "1.5 GB",
     "Systran/faster-whisper-large-v3": "3 GB",
@@ -194,6 +196,48 @@ def _transcribe_mlx(
     return cues
 
 
+def _transcribe_vibevoice(
+    wav_path: Path,
+    initial_prompt: str | None,
+    model_id: str,
+    *,
+    clip_start: float = 0.0,
+    clip_end: float | None = None,
+) -> list[dict]:
+    """VibeVoice-ASR (mlx-audio) を別プロセスで実行する。
+
+    分割・時刻補正は ``vibevoice_runner`` 側。``initial_prompt`` は VibeVoice の
+    context (hotwords) としてそのまま渡す。
+    """
+    from ..errors import AsrError, MissingToolError
+    from ._models import ensure_model_downloaded
+
+    if importlib.util.find_spec("mlx_audio") is None:
+        raise MissingToolError(
+            "mlx-audio がインストールされていません。`uv sync --extra asr-vibevoice` を実行してください。"
+        )
+    ensure_model_downloaded(model_id, label="asr", size_hint=_KNOWN_MODEL_SIZES.get(model_id))
+
+    out_path = wav_path.parent / f"{wav_path.stem}_vibevoice.json"
+    cmd = [
+        sys.executable, "-m", "kokkai.shugiin.vibevoice_runner",
+        str(wav_path), str(out_path), "--model", model_id,
+        "--clip-start", f"{clip_start:.2f}",
+    ]
+    if clip_end is not None:
+        cmd += ["--clip-end", f"{clip_end:.2f}"]
+    if initial_prompt:
+        cmd += ["--context", initial_prompt]
+
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        raise AsrError(f"VibeVoice 実行失敗 (exit {e.returncode})") from e
+    if not out_path.exists():
+        raise AsrError(f"VibeVoice が JSON を出力しませんでした: {out_path}")
+    return json.loads(out_path.read_text(encoding="utf-8"))["cues"]
+
+
 def transcribe(
     wav_path: Path,
     initial_prompt: str | None = None,
@@ -231,6 +275,13 @@ def transcribe(
 
     if backend not in ASR_BACKENDS:
         raise AsrError(f"未対応の ASR backend: {backend} (使えるのは {ASR_BACKENDS})")
+
+    if backend == "vibevoice":
+        model_id = model_size if "/" in model_size else DEFAULT_VIBEVOICE_MODEL
+        return _transcribe_vibevoice(
+            wav_path, initial_prompt, model_id,
+            clip_start=clip_start, clip_end=clip_end,
+        )
 
     if backend == "mlx":
         model_id = model_size if "/" in model_size else DEFAULT_MLX_MODEL

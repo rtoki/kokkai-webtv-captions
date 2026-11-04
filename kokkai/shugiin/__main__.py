@@ -442,9 +442,10 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="ASR を実行して字幕付き HTML を生成 (既定で有効、要 [shugiin-asr] + ffmpeg)")
     g_asr.add_argument("--no-asr", dest="asr", action="store_false",
                        help="ASR を実行せず Phase 2 のタイムラインのみ生成")
-    g_asr.add_argument("--asr-backend", choices=["faster", "mlx"], default=None,
+    g_asr.add_argument("--asr-backend", choices=["faster", "mlx", "vibevoice"], default=None,
                        help=("ASR backend (省略時は Apple Silicon + mlx_whisper 利用可なら "
-                             "mlx、それ以外は faster を自動選択)"))
+                             "mlx、それ以外は faster を自動選択)。vibevoice は "
+                             "VibeVoice-ASR 4bit (mlx-audio、Apple Silicon 専用、~6GB)"))
     g_asr.add_argument("--model", default="turbo",
                        help=("Whisper モデル (faster: turbo/large-v3/medium/small/base/tiny..., "
                              "mlx: HF model id)。tiny/base は CPU 機・低スペック向け"))

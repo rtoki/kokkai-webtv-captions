@@ -18,7 +18,7 @@ from kokkai.shugiin.asr import (
 
 def test_backend_constants_are_stable():
     """ASR backend 名は CLI / docs に出ているので固定する。"""
-    assert ASR_BACKENDS == ("faster", "mlx")
+    assert ASR_BACKENDS == ("faster", "mlx", "vibevoice")
     assert DEFAULT_ASR_BACKEND == "faster"
     assert DEFAULT_MLX_MODEL.startswith("mlx-community/whisper-")
 
